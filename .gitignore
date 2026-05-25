@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+
+# Never commit Firebase service-account keys or any admin credentials
+*firebase-adminsdk*.json
+*service-account*.json
+*-serviceaccount*.json
+secrets/
+
+# Build / cache
+*.tsbuildinfo
+.DS_Store
+coverage/

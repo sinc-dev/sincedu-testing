@@ -1,0 +1,17 @@
+{
+  "name": "sincedu-testing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Embeddable tester-feedback tool: element picker + screenshot + logs, Supabase-gated, Cloudflare-native (D1 + R2).",
+  "scripts": {
+    "dev:worker": "pnpm -C worker run dev",
+    "dev:widget": "pnpm -C widget run dev",
+    "dev:app": "pnpm -C app run dev",
+    "build": "pnpm -C widget run build && pnpm -C app run build",
+    "type-check": "pnpm -C worker run type-check && pnpm -C widget run type-check && pnpm -C app run type-check"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "packageManager": "pnpm@10.28.0"
+}

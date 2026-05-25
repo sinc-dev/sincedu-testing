@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Widget demo host</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #111827; }
+      .bar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: #1f2937; color: #fff; }
+      .bar .slot { display: flex; align-items: center; gap: 12px; }
+      main { max-width: 720px; margin: 40px auto; padding: 0 20px; }
+      .box { border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px; margin: 16px 0; }
+      button { padding: 8px 14px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <strong>Demo host app</strong>
+      <div class="slot">
+        <!-- Option B: the widget mounts its crosshair button into this slot -->
+        <span id="tf-slot"></span>
+        <span>user@example.com</span>
+      </div>
+    </div>
+
+    <main>
+      <h1>Some content to pick from</h1>
+      <div class="box" id="card-pricing">
+        <h2>Pricing card</h2>
+        <p>A paragraph with a <a href="#">link</a> and a <button id="broken-btn">Submit</button>.</p>
+      </div>
+      <div class="box" data-testid="profile-panel">
+        <h2>Profile panel</h2>
+        <p>This element has a data-testid the picker will prefer.</p>
+      </div>
+      <p><button id="trigger-error">Trigger a console error + failed request (to test log capture)</button></p>
+    </main>
+
+    <script>
+      // Demo: generate some diagnostics so reports carry logs.
+      document.getElementById("trigger-error").addEventListener("click", () => {
+        console.error("Demo error from host app", new Error("boom"));
+        fetch("http://localhost:8788/does-not-exist").catch(() => {});
+      });
+    </script>
+
+    <!-- The widget. data-mount puts the crosshair in the app bar slot above.
+         data-review-url points auth + "view my reports" at the LOCAL review app. -->
+    <script
+      src="http://localhost:8788/widget.js"
+      data-project="demo"
+      data-mount="#tf-slot"
+      data-review-url="http://localhost:5400"
+    ></script>
+  </body>
+</html>

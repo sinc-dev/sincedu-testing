@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sincedu-testing-worker",
+  "account_id": "9a2b6956cc47f63e13beb91af5363970",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
+  },
+  "dev": {
+    "port": 8788
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sincedu-testing",
+      "database_id": "ce81732e-65cc-4deb-808f-9efd7faaa668"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STORAGE",
+      "bucket_name": "sincedu-testing"
+    }
+  ]
+}

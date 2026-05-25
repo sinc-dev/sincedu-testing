@@ -1,0 +1,8 @@
+# Copy to .dev.vars for local development (gitignored).
+# These override the "vars" in wrangler.jsonc for local `wrangler dev`.
+
+FIREBASE_PROJECT_ID="sincedu"
+# While developing, "*" lets any origin embed/call. Lock this down for prod.
+ALLOWED_ORIGINS="*"
+# Comma-separated admin emails — can view all reports + manage the allowlist.
+ADMIN_EMAILS="you@studyinnc.com"
