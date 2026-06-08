@@ -94,37 +94,63 @@ export function cachedEmail(): string | null {
   return cached?.email ?? null;
 }
 
+function decodeMaybeBase64(value: string): string {
+  if (!value.startsWith("base64-")) return value;
+  const b64 = value.slice(7);
+  try {
+    return decodeURIComponent(escape(atob(b64)));
+  } catch {
+    try {
+      return atob(b64);
+    } catch {
+      return "";
+    }
+  }
+}
+
+// Read a stored value that may be chunked across `<base>.0`, `<base>.1`, … as
+// @supabase/ssr does for large sessions. Returns the reassembled string.
+function readStorageValue(base: string): string {
+  if (localStorage.getItem(`${base}.0`) == null) {
+    return localStorage.getItem(base) ?? "";
+  }
+  let combined = "";
+  for (let i = 0; ; i += 1) {
+    const part = localStorage.getItem(`${base}.${i}`);
+    if (part == null) break;
+    combined += part;
+  }
+  return combined;
+}
+
 // When embedded in an app that already runs Supabase auth on the SAME project
-// the worker verifies against, we can reuse that live session instead of
-// opening our /auth popup. Scans localStorage for a persisted Supabase session
-// (any storageKey — supabase-js defaults to `sb-<ref>-auth-token`; @supabase/ssr
-// and custom configs use other names and may base64-wrap the value).
+// the worker verifies against, reuse that live session instead of opening our
+// /auth popup. Scans localStorage for a persisted Supabase session under any
+// storageKey (supabase-js: `sb-<ref>-auth-token`; @supabase/ssr / custom keys),
+// handling both base64-wrapped values and chunked `<key>.N` storage.
 export function hostSupabaseToken(): string | null {
   try {
     if (typeof localStorage === "undefined") return null;
+    const bases = new Set<string>();
     for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (!key) continue;
-      let raw = localStorage.getItem(key);
+      if (key) bases.add(key.replace(/\.\d+$/, ""));
+    }
+    for (const base of bases) {
+      const raw = readStorageValue(base);
       if (!raw) continue;
-      if (raw.startsWith("base64-")) {
-        try {
-          raw = decodeURIComponent(escape(atob(raw.slice(7))));
-        } catch {
-          continue;
-        }
-      }
-      if (!raw.includes("access_token")) continue;
+      const text = decodeMaybeBase64(raw);
+      if (!text.includes("access_token")) continue;
       let parsed: any;
       try {
-        parsed = JSON.parse(raw);
+        parsed = JSON.parse(text);
       } catch {
         continue;
       }
       const session = parsed?.currentSession ?? parsed;
       const access = session?.access_token;
       if (typeof access !== "string" || !access) continue;
-      // expires_at is in seconds. Skip if missing-and-decodable-expired or near expiry.
+      // expires_at is in seconds. Skip expired / near-expiry sessions.
       const expiresAt: number =
         typeof session?.expires_at === "number" ? session.expires_at * 1000 : decodeExpiry(access);
       if (expiresAt && expiresAt < Date.now() + 30000) continue;

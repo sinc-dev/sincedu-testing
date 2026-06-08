@@ -21,6 +21,11 @@ declare global {
 
 const scriptEl = document.currentScript as HTMLScriptElement | null;
 
+function isLocalhost(): boolean {
+  const h = location.hostname;
+  return h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h === "::1" || h.endsWith(".localhost");
+}
+
 function boot() {
   const config = readConfig(scriptEl);
   installDiagnostics();
@@ -92,6 +97,14 @@ function boot() {
           // fall through to the popup.
         }
       }
+    }
+
+    // On localhost the /auth popup to testing.sincedu.com is unwanted — the
+    // tester is expected to already be signed into the host app (same Supabase
+    // project). Don't redirect; tell them to sign in to the app instead.
+    if (isLocalhost()) {
+      ui.showToast("Sign in to the app first to use tester capture");
+      return null;
     }
 
     const auth = await getToken(config.authUrl);
