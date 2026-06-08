@@ -1,7 +1,8 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env, Variables } from "./types.js";
-import reports from "./routes/reports.js";
+import reports, { ingestEducationPortalsReport } from "./routes/reports.js";
 import allowlist from "./routes/allowlist.js";
 import mcp from "./routes/mcp.js";
 import { WIDGET_JS } from "./generated/widgetBundle.js";
@@ -51,4 +52,30 @@ app.onError((err, c) => {
   return c.json({ error: "Internal Error", message: err.message }, 500);
 });
 
-export default app;
+/**
+ * WorkerEntrypoint so this worker can be reached both ways:
+ * - `fetch` — the public HTTP surface (widget, dashboard API, legacy token ingest)
+ * - `ingestReport` — a token-free RPC method callable ONLY via a Service Binding
+ *   from the education-portals workers. Trust comes from the same-account
+ *   binding, eliminating the shared-token coordination across portal branches.
+ */
+export default class SincEduTestingWorker extends WorkerEntrypoint<Env> {
+  fetch(request: Request): Response | Promise<Response> {
+    return app.fetch(request, this.env, this.ctx);
+  }
+
+  /**
+   * Mirror a tester report from an education-portals worker. Enforces the
+   * tester allowlist; throws ReportError(400/403) on rejection. Returns the
+   * created report id.
+   */
+  ingestReport(payload: {
+    project?: unknown;
+    reporterEmail?: unknown;
+    reporterName?: unknown;
+    meta?: unknown;
+    screenshot?: { bytes: ArrayBuffer; type?: string } | null;
+  }): Promise<{ id: string; status: string }> {
+    return ingestEducationPortalsReport(this.env, payload);
+  }
+}

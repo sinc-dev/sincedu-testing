@@ -9,7 +9,7 @@ export const supabase = createClient(supabaseUrl || "https://placeholder.supabas
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: true,
+    detectSessionInUrl: false,
     storageKey: "sincedu-testing-supabase-auth",
     flowType: "pkce",
   },
@@ -19,14 +19,28 @@ export function getAuthRedirectUrl(path = "/"): string {
   return `${window.location.origin}${path}`;
 }
 
+let oauthRedirectPromise: Promise<void> | null = null;
+
 export async function completeOAuthRedirect(): Promise<void> {
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   if (!code) return;
 
-  const { error } = await supabase.auth.exchangeCodeForSession(code);
-  if (error) throw error;
+  oauthRedirectPromise ??= (async () => {
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session || !error.message.toLowerCase().includes("code verifier")) {
+        throw error;
+      }
+    }
 
-  url.searchParams.delete("code");
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    url.searchParams.delete("code");
+    url.searchParams.delete("state");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  })().finally(() => {
+    oauthRedirectPromise = null;
+  });
+
+  return oauthRedirectPromise;
 }

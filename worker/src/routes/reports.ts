@@ -73,13 +73,50 @@ function parseMeta(raw: unknown): Record<string, unknown> {
   }
 }
 
-async function persistReport(c: any, params: {
+/** Carries an HTTP status so context-free ingest paths can surface a clean error. */
+export class ReportError extends Error {
+  constructor(public status: 400 | 403, message: string) {
+    super(message);
+    this.name = "ReportError";
+  }
+}
+
+type ScreenshotInput =
+  | { size?: number; type?: string; arrayBuffer?: () => Promise<ArrayBuffer> }
+  | { bytes: ArrayBuffer; type?: string }
+  | null
+  | undefined;
+
+async function normalizeScreenshot(
+  input: ScreenshotInput,
+): Promise<{ data: ArrayBuffer; type: string } | null> {
+  if (!input) return null;
+  if ("bytes" in input && input.bytes) {
+    const size = input.bytes.byteLength;
+    if (size <= 0) return null;
+    if (size > MAX_SCREENSHOT_BYTES) throw new ReportError(400, "Screenshot too large");
+    return { data: input.bytes, type: input.type || "image/jpeg" };
+  }
+  const file = input as { size?: number; type?: string; arrayBuffer?: () => Promise<ArrayBuffer> };
+  if (typeof file.arrayBuffer === "function" && (file.size ?? 0) > 0) {
+    if ((file.size ?? 0) > MAX_SCREENSHOT_BYTES) throw new ReportError(400, "Screenshot too large");
+    return { data: await file.arrayBuffer(), type: file.type || "image/jpeg" };
+  }
+  return null;
+}
+
+/**
+ * Context-free report writer shared by the HTTP route and the RPC entrypoint.
+ * Persists screenshot/console/network blobs to R2 and the row to D1, returning
+ * the created id. Throws ReportError for client-facing failures.
+ */
+async function persistReportCore(env: Env, params: {
   project: string;
   reporterEmail: string;
   reporterName: string | null;
   meta: Record<string, unknown>;
-  screenshot: unknown;
-}) {
+  screenshot: ScreenshotInput;
+}): Promise<{ id: string; status: string }> {
   const project = sanitizePlainText(params.project || "default", 100) || "default";
   const note = sanitizePlainText(params.meta.note, 4000);
   const explicitTitle = sanitizePlainText(params.meta.title, 120);
@@ -101,33 +138,28 @@ async function persistReport(c: any, params: {
   let consoleKey: string | null = null;
   let networkKey: string | null = null;
 
-  const screenshot = params.screenshot as
-    | { size?: number; type?: string; arrayBuffer?: () => Promise<ArrayBuffer> }
-    | null;
-  if (screenshot && typeof screenshot.arrayBuffer === "function" && (screenshot.size ?? 0) > 0) {
-    if ((screenshot.size ?? 0) > MAX_SCREENSHOT_BYTES) {
-      return c.json({ error: "Bad Request", message: "Screenshot too large" }, 400);
-    }
+  const screenshot = await normalizeScreenshot(params.screenshot);
+  if (screenshot) {
     screenshotKey = `${baseKey}/screenshot.jpg`;
-    await c.env.STORAGE.put(screenshotKey, await screenshot.arrayBuffer(), {
-      httpMetadata: { contentType: screenshot.type || "image/jpeg" },
+    await env.STORAGE.put(screenshotKey, screenshot.data, {
+      httpMetadata: { contentType: screenshot.type },
     });
   }
 
   if (consoleLogs.length > 0) {
     consoleKey = `${baseKey}/console.json`;
-    await c.env.STORAGE.put(consoleKey, JSON.stringify(consoleLogs), {
+    await env.STORAGE.put(consoleKey, JSON.stringify(consoleLogs), {
       httpMetadata: { contentType: "application/json" },
     });
   }
   if (networkLogs.length > 0) {
     networkKey = `${baseKey}/network.json`;
-    await c.env.STORAGE.put(networkKey, JSON.stringify(networkLogs), {
+    await env.STORAGE.put(networkKey, JSON.stringify(networkLogs), {
       httpMetadata: { contentType: "application/json" },
     });
   }
 
-  await c.env.DB.prepare(
+  await env.DB.prepare(
     `INSERT OR IGNORE INTO reports (
       id, project, reporter_email, reporter_name, title, note, severity,
       page_url, user_agent, element_selector, element_text, element_rect,
@@ -155,7 +187,65 @@ async function persistReport(c: any, params: {
     )
     .run();
 
-  return c.json({ id, status: "open" }, 201);
+  return { id, status: "open" };
+}
+
+/** Hono wrapper used by the dashboard POST route. Maps ReportError to JSON. */
+async function persistReport(c: any, params: {
+  project: string;
+  reporterEmail: string;
+  reporterName: string | null;
+  meta: Record<string, unknown>;
+  screenshot: unknown;
+}) {
+  try {
+    const result = await persistReportCore(c.env as Env, {
+      ...params,
+      screenshot: params.screenshot as ScreenshotInput,
+    });
+    return c.json(result, 201);
+  } catch (err) {
+    if (err instanceof ReportError) {
+      return c.json({ error: "Bad Request", message: err.message }, err.status);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Token-free ingest used by the education-portals senders over a Service
+ * Binding (RPC). Enforces the tester allowlist, then persists. Throws
+ * ReportError(400/403) for client-facing failures.
+ */
+export async function ingestEducationPortalsReport(env: Env, payload: {
+  project?: unknown;
+  reporterEmail?: unknown;
+  reporterName?: unknown;
+  meta?: unknown;
+  screenshot?: ScreenshotInput;
+}): Promise<{ id: string; status: string }> {
+  const reporterEmail = normalizeEmail(
+    typeof payload.reporterEmail === "string" ? payload.reporterEmail : "",
+  );
+  if (!reporterEmail) throw new ReportError(400, "reporterEmail is required");
+
+  const admin = isAdminEmail(reporterEmail, env.ADMIN_EMAILS);
+  const tester = admin || (await isAllowlisted(env.DB, reporterEmail));
+  if (!tester) throw new ReportError(403, "Reporter is not on the tester allowlist");
+
+  const meta = typeof payload.meta === "string" ? parseMeta(payload.meta) : (
+    payload.meta && typeof payload.meta === "object" ? payload.meta as Record<string, unknown> : {}
+  );
+
+  return persistReportCore(env, {
+    project: typeof payload.project === "string" && payload.project.trim()
+      ? payload.project
+      : "educational-portals",
+    reporterEmail,
+    reporterName: sanitizePlainText(payload.reporterName, 200) || null,
+    meta,
+    screenshot: payload.screenshot,
+  });
 }
 
 async function canAccessReport(c: any, report: { reporter_email: string }): Promise<boolean> {
@@ -186,6 +276,9 @@ reports.post("/", requireAuth, requireTester, async (c) => {
   });
 });
 
+// Legacy HTTP ingest (shared token). Senders on a Service Binding use the
+// token-free RPC method (ingestReport) instead; this path stays for backward
+// compatibility and as a fallback while the binding rolls out.
 reports.post("/integrations/education-portals", async (c) => {
   const configuredToken = c.env.EDUCATION_PORTALS_INGEST_TOKEN;
   const providedToken = c.req.header("x-sincedu-ingest-token");
@@ -194,20 +287,22 @@ reports.post("/integrations/education-portals", async (c) => {
   }
 
   const form = await c.req.formData();
-  const reporterEmail = normalizeEmail(form.get("reporterEmail"));
-  if (!reporterEmail) return c.json({ error: "Bad Request", message: "reporterEmail is required" }, 400);
-
-  const admin = isAdminEmail(reporterEmail, c.env.ADMIN_EMAILS);
-  const tester = admin || (await isAllowlisted(c.env.DB, reporterEmail));
-  if (!tester) return c.json({ error: "Forbidden", message: "Reporter is not on the tester allowlist" }, 403);
-
-  return persistReport(c, {
-    project: String(form.get("project") || "educational-portals"),
-    reporterEmail,
-    reporterName: sanitizePlainText(form.get("reporterName"), 200) || null,
-    meta: parseMeta(form.get("meta")),
-    screenshot: form.get("screenshot"),
-  });
+  try {
+    const result = await ingestEducationPortalsReport(c.env, {
+      project: form.get("project"),
+      reporterEmail: form.get("reporterEmail"),
+      reporterName: form.get("reporterName"),
+      meta: form.get("meta"),
+      screenshot: form.get("screenshot") as ScreenshotInput,
+    });
+    return c.json(result, 201);
+  } catch (err) {
+    if (err instanceof ReportError) {
+      const label = err.status === 403 ? "Forbidden" : "Bad Request";
+      return c.json({ error: label, message: err.message }, err.status);
+    }
+    throw err;
+  }
 });
 
 // GET / — list reports. Admin sees all; testers see their own.
