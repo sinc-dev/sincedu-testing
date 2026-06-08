@@ -50,23 +50,46 @@ function buildSelector(el: Element): string {
   return parts.join(" > ");
 }
 
+async function screenshotBody(): Promise<File> {
+  const blob = await domToBlob(document.body, {
+    type: "image/jpeg",
+    quality: 0.82,
+    scale: 0.75,
+    backgroundColor: "#ffffff",
+    filter: shouldIncludeInScreenshot,
+  });
+  return new File([blob], `screenshot-${Date.now()}.jpg`, { type: "image/jpeg" });
+}
+
 async function capture(el: HTMLElement): Promise<File> {
   const prevOutline = el.style.outline;
   const prevOffset = el.style.outlineOffset;
   el.style.outline = `3px solid ${HIGHLIGHT_COLOR}`;
   el.style.outlineOffset = "2px";
   try {
-	    const blob = await domToBlob(document.body, {
-	      type: "image/jpeg",
-	      quality: 0.82,
-	      scale: 0.75,
-	      backgroundColor: "#ffffff",
-	      filter: shouldIncludeInScreenshot,
-	    });
-    return new File([blob], `screenshot-${Date.now()}.jpg`, { type: "image/jpeg" });
+    return await screenshotBody();
   } finally {
     el.style.outline = prevOutline;
     el.style.outlineOffset = prevOffset;
+  }
+}
+
+// Capture the current viewport with nothing highlighted — for when the tester
+// just wants to attach what they're seeing rather than a specific element. The
+// widget host carries the ignore attribute, so the launcher/card never appear.
+export async function captureViewport(): Promise<CapturedTarget | null> {
+  if (typeof document === "undefined") return null;
+  try {
+    const screenshot = await screenshotBody();
+    return {
+      selector: "(viewport)",
+      text: "",
+      rect: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight },
+      pointer: { x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) },
+      screenshot,
+    };
+  } catch {
+    return null;
   }
 }
 
