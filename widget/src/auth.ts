@@ -108,53 +108,100 @@ function decodeMaybeBase64(value: string): string {
   }
 }
 
-// Read a stored value that may be chunked across `<base>.0`, `<base>.1`, … as
-// @supabase/ssr does for large sessions. Returns the reassembled string.
-function readStorageValue(base: string): string {
-  if (localStorage.getItem(`${base}.0`) == null) {
-    return localStorage.getItem(base) ?? "";
+// Reassemble values chunked across `<base>.0`, `<base>.1`, … (as @supabase/ssr
+// does for large sessions) from an arbitrary key→value source.
+function collectSessionStrings(keys: string[], get: (key: string) => string | null): string[] {
+  const bases = new Set<string>();
+  for (const key of keys) bases.add(key.replace(/\.\d+$/, ""));
+  const out: string[] = [];
+  for (const base of bases) {
+    let raw: string;
+    if (get(`${base}.0`) != null) {
+      let combined = "";
+      for (let i = 0; ; i += 1) {
+        const part = get(`${base}.${i}`);
+        if (part == null) break;
+        combined += part;
+      }
+      raw = combined;
+    } else {
+      raw = get(base) ?? "";
+    }
+    if (raw) out.push(decodeMaybeBase64(raw));
   }
-  let combined = "";
-  for (let i = 0; ; i += 1) {
-    const part = localStorage.getItem(`${base}.${i}`);
-    if (part == null) break;
-    combined += part;
+  return out;
+}
+
+function cookieMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const part of (document.cookie || "").split(";")) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    const name = part.slice(0, idx).trim();
+    if (!name) continue;
+    const value = part.slice(idx + 1).trim();
+    try {
+      map.set(name, decodeURIComponent(value));
+    } catch {
+      map.set(name, value);
+    }
   }
-  return combined;
+  return map;
+}
+
+function accessTokenFromSession(text: string): string | null {
+  if (!text.includes("access_token")) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  // Some @supabase/ssr versions store an array [access_token, refresh_token, …];
+  // others store the session object (optionally under `currentSession`).
+  let access: unknown;
+  let expSec: number | undefined;
+  if (Array.isArray(parsed) && typeof parsed[0] === "string") {
+    access = parsed[0];
+  } else {
+    const session = parsed?.currentSession ?? parsed;
+    access = session?.access_token;
+    expSec = typeof session?.expires_at === "number" ? session.expires_at : undefined;
+  }
+  if (typeof access !== "string" || !access) return null;
+  const expiresAt = expSec ? expSec * 1000 : decodeExpiry(access);
+  if (expiresAt && expiresAt < Date.now() + 30000) return null;
+  return access;
 }
 
 // When embedded in an app that already runs Supabase auth on the SAME project
 // the worker verifies against, reuse that live session instead of opening our
-// /auth popup. Scans localStorage for a persisted Supabase session under any
-// storageKey (supabase-js: `sb-<ref>-auth-token`; @supabase/ssr / custom keys),
-// handling both base64-wrapped values and chunked `<key>.N` storage.
+// /auth popup. Scans BOTH localStorage and cookies (@supabase/ssr stores the
+// session in cookies) under any storageKey, handling base64-wrapped and chunked
+// `<key>.N` storage.
 export function hostSupabaseToken(): string | null {
   try {
-    if (typeof localStorage === "undefined") return null;
-    const bases = new Set<string>();
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (key) bases.add(key.replace(/\.\d+$/, ""));
-    }
-    for (const base of bases) {
-      const raw = readStorageValue(base);
-      if (!raw) continue;
-      const text = decodeMaybeBase64(raw);
-      if (!text.includes("access_token")) continue;
-      let parsed: any;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        continue;
+    const candidates: string[] = [];
+
+    if (typeof localStorage !== "undefined") {
+      const keys: string[] = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key) keys.push(key);
       }
-      const session = parsed?.currentSession ?? parsed;
-      const access = session?.access_token;
-      if (typeof access !== "string" || !access) continue;
-      // expires_at is in seconds. Skip expired / near-expiry sessions.
-      const expiresAt: number =
-        typeof session?.expires_at === "number" ? session.expires_at * 1000 : decodeExpiry(access);
-      if (expiresAt && expiresAt < Date.now() + 30000) continue;
-      return access;
+      candidates.push(...collectSessionStrings(keys, (k) => localStorage.getItem(k)));
+    }
+
+    if (typeof document !== "undefined" && document.cookie) {
+      const cookies = cookieMap();
+      candidates.push(
+        ...collectSessionStrings([...cookies.keys()], (k) => (cookies.has(k) ? cookies.get(k)! : null)),
+      );
+    }
+
+    for (const text of candidates) {
+      const access = accessTokenFromSession(text);
+      if (access) return access;
     }
   } catch {
     /* ignore */
