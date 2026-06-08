@@ -21,10 +21,12 @@ CREATE TABLE IF NOT EXISTS reports (
   resolution TEXT,
   page_url TEXT,
   user_agent TEXT,
-  element_selector TEXT,
+  element_selector TEXT,         -- primary (first) picked element, kept for back-compat
   element_text TEXT,
   element_rect TEXT,              -- json {x,y,width,height}
-  screenshot_key TEXT,           -- R2 key
+  elements TEXT,                  -- json array of {selector,text,rect} (all picked elements)
+  screenshot_key TEXT,           -- R2 key of the first/primary screenshot, kept for back-compat
+  screenshot_keys TEXT,          -- json array of R2 keys (all screenshots)
   console_logs_key TEXT,         -- R2 key (json blob)
   network_logs_key TEXT,         -- R2 key (json blob)
   console_count INTEGER NOT NULL DEFAULT 0,

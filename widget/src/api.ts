@@ -1,4 +1,3 @@
-import type { CapturedTarget } from "./picker.js";
 import { getConsoleEntries, getNetworkEntries } from "./diagnostics.js";
 
 export interface AccessInfo {
@@ -16,20 +15,31 @@ export async function fetchAccess(apiBase: string, token: string): Promise<Acces
   return res.json();
 }
 
+export interface ReportElement {
+  selector: string;
+  text: string;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
 export interface SubmitInput {
   apiBase: string;
   token: string;
   project: string;
   note: string;
   severity: string;
-  captured: CapturedTarget;
+  // [send-time overview, ...any manually attached viewport shots]
+  screenshots: File[];
+  elements: ReportElement[];
+  screenshotError?: string;
 }
 
 export async function submitReport(input: SubmitInput): Promise<{ id: string }> {
-  const { apiBase, token, project, note, severity, captured } = input;
+  const { apiBase, token, project, note, severity, screenshots, elements, screenshotError } = input;
   const form = new FormData();
   form.append("project", project);
-  form.append("screenshot", captured.screenshot);
+  for (const shot of screenshots) form.append("screenshots", shot);
+
+  const primary = elements[0];
   form.append(
     "meta",
     JSON.stringify({
@@ -37,11 +47,15 @@ export async function submitReport(input: SubmitInput): Promise<{ id: string }> 
       severity,
       pageUrl: window.location.href,
       userAgent: navigator.userAgent,
-      elementSelector: captured.selector,
-      elementText: captured.text,
-      elementRect: captured.rect,
+      // Legacy single-element fields mirror the primary pick for back-compat.
+      elementSelector: primary?.selector,
+      elementText: primary?.text,
+      elementRect: primary?.rect,
+      elements,
       consoleLogs: getConsoleEntries(),
       networkLogs: getNetworkEntries(),
+      screenshotError: screenshotError || undefined,
+      screenshotCount: screenshots.length,
     }),
   );
 

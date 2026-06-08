@@ -57,6 +57,37 @@ function normalizeIds(value: unknown): string[] {
     .slice(0, 200))];
 }
 
+interface NormalizedElement {
+  selector: string;
+  text: string;
+  rect: unknown;
+}
+
+// Builds the list of picked elements. Prefers `meta.elements` (the multi-element
+// payload); falls back to the legacy single-element fields so older senders and
+// the education-portals mirror keep working.
+function normalizeElements(value: unknown, meta: Record<string, unknown>): NormalizedElement[] {
+  const out: NormalizedElement[] = [];
+  if (Array.isArray(value)) {
+    for (const entry of value.slice(0, 25)) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const selector = sanitizePlainText(e.selector, 1000);
+      const text = sanitizePlainText(e.text, 1000);
+      const rect = e.rect && typeof e.rect === "object" ? e.rect : null;
+      if (!selector && !text && !rect) continue;
+      out.push({ selector, text, rect });
+    }
+  }
+  if (out.length === 0) {
+    const selector = sanitizePlainText(meta.elementSelector, 1000);
+    const text = sanitizePlainText(meta.elementText, 1000);
+    const rect = meta.elementRect && typeof meta.elementRect === "object" ? meta.elementRect : null;
+    if (selector || text || rect) out.push({ selector, text, rect });
+  }
+  return out;
+}
+
 function normalizeSourceId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -91,16 +122,22 @@ async function normalizeScreenshot(
   input: ScreenshotInput,
 ): Promise<{ data: ArrayBuffer; type: string } | null> {
   if (!input) return null;
-  if ("bytes" in input && input.bytes) {
+  // File/Blob from a multipart form — check this FIRST. Modern Workers runtimes
+  // add Blob.prototype.bytes(), so a File now also has a `bytes` member; the RPC
+  // branch below must not misfire on it (returning the method to R2.put throws
+  // "parameter 2 is not of type ...").
+  const file = input as { size?: number; type?: string; arrayBuffer?: () => Promise<ArrayBuffer> };
+  if (typeof file.arrayBuffer === "function") {
+    if ((file.size ?? 0) <= 0) return null;
+    if ((file.size ?? 0) > MAX_SCREENSHOT_BYTES) throw new ReportError(400, "Screenshot too large");
+    return { data: await file.arrayBuffer(), type: file.type || "image/jpeg" };
+  }
+  // RPC payload: a raw binary buffer in `bytes` (only a real ArrayBuffer/view).
+  if ("bytes" in input && (input.bytes instanceof ArrayBuffer || ArrayBuffer.isView(input.bytes))) {
     const size = input.bytes.byteLength;
     if (size <= 0) return null;
     if (size > MAX_SCREENSHOT_BYTES) throw new ReportError(400, "Screenshot too large");
     return { data: input.bytes, type: input.type || "image/jpeg" };
-  }
-  const file = input as { size?: number; type?: string; arrayBuffer?: () => Promise<ArrayBuffer> };
-  if (typeof file.arrayBuffer === "function" && (file.size ?? 0) > 0) {
-    if ((file.size ?? 0) > MAX_SCREENSHOT_BYTES) throw new ReportError(400, "Screenshot too large");
-    return { data: await file.arrayBuffer(), type: file.type || "image/jpeg" };
   }
   return null;
 }
@@ -115,7 +152,9 @@ async function persistReportCore(env: Env, params: {
   reporterEmail: string;
   reporterName: string | null;
   meta: Record<string, unknown>;
-  screenshot: ScreenshotInput;
+  // Either a single screenshot (legacy / RPC mirror) or several (multi-element).
+  screenshot?: ScreenshotInput;
+  screenshots?: ScreenshotInput[];
 }): Promise<{ id: string; status: string }> {
   const project = sanitizePlainText(params.project || "default", 100) || "default";
   const note = sanitizePlainText(params.meta.note, 4000);
@@ -124,27 +163,39 @@ async function persistReportCore(env: Env, params: {
   const severity = normalizeSeverity(params.meta.severity);
   const pageUrl = sanitizePlainText(params.meta.pageUrl, 2000) || null;
   const userAgent = sanitizePlainText(params.meta.userAgent, 500) || null;
-  const elementSelector = sanitizePlainText(params.meta.elementSelector, 1000) || null;
-  const elementText = sanitizePlainText(params.meta.elementText, 1000) || null;
-  const elementRect = params.meta.elementRect && typeof params.meta.elementRect === "object"
-    ? JSON.stringify(params.meta.elementRect).slice(0, 2000)
-    : null;
+
+  const elements = normalizeElements(params.meta.elements, params.meta);
+  const primary = elements[0] ?? null;
+  const elementSelector = primary?.selector || null;
+  const elementText = primary?.text || null;
+  const elementRect = primary?.rect ? JSON.stringify(primary.rect).slice(0, 2000) : null;
+  const elementsJson = elements.length > 0 ? JSON.stringify(elements).slice(0, 20000) : null;
+
   const consoleLogs = sanitizeLogEntries(params.meta.consoleLogs);
   const networkLogs = sanitizeLogEntries(params.meta.networkLogs);
 
   const id = normalizeSourceId(params.meta.localReportId) || uuid();
   const baseKey = `reports/${project}/${id}`;
-  let screenshotKey: string | null = null;
   let consoleKey: string | null = null;
   let networkKey: string | null = null;
 
-  const screenshot = await normalizeScreenshot(params.screenshot);
-  if (screenshot) {
-    screenshotKey = `${baseKey}/screenshot.jpg`;
-    await env.STORAGE.put(screenshotKey, screenshot.data, {
-      httpMetadata: { contentType: screenshot.type },
-    });
+  // Persist every screenshot. The first one is treated as primary (its key
+  // lands in screenshot_key so legacy readers and the list view still work).
+  const inputs: ScreenshotInput[] = params.screenshots?.length
+    ? params.screenshots
+    : params.screenshot
+      ? [params.screenshot]
+      : [];
+  const screenshotKeys: string[] = [];
+  for (const input of inputs) {
+    const shot = await normalizeScreenshot(input);
+    if (!shot) continue;
+    const key = `${baseKey}/screenshot-${screenshotKeys.length}.jpg`;
+    await env.STORAGE.put(key, shot.data, { httpMetadata: { contentType: shot.type } });
+    screenshotKeys.push(key);
   }
+  const screenshotKey = screenshotKeys[0] ?? null;
+  const screenshotKeysJson = screenshotKeys.length > 0 ? JSON.stringify(screenshotKeys) : null;
 
   if (consoleLogs.length > 0) {
     consoleKey = `${baseKey}/console.json`;
@@ -162,9 +213,9 @@ async function persistReportCore(env: Env, params: {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO reports (
       id, project, reporter_email, reporter_name, title, note, severity,
-      page_url, user_agent, element_selector, element_text, element_rect,
-      screenshot_key, console_logs_key, network_logs_key, console_count, network_count
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      page_url, user_agent, element_selector, element_text, element_rect, elements,
+      screenshot_key, screenshot_keys, console_logs_key, network_logs_key, console_count, network_count
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   )
     .bind(
       id,
@@ -179,7 +230,9 @@ async function persistReportCore(env: Env, params: {
       elementSelector,
       elementText,
       elementRect,
+      elementsJson,
       screenshotKey,
+      screenshotKeysJson,
       consoleKey,
       networkKey,
       consoleLogs.length,
@@ -196,12 +249,12 @@ async function persistReport(c: any, params: {
   reporterEmail: string;
   reporterName: string | null;
   meta: Record<string, unknown>;
-  screenshot: unknown;
+  screenshots: unknown[];
 }) {
   try {
     const result = await persistReportCore(c.env as Env, {
       ...params,
-      screenshot: params.screenshot as ScreenshotInput,
+      screenshots: params.screenshots as ScreenshotInput[],
     });
     return c.json(result, 201);
   } catch (err) {
@@ -223,6 +276,7 @@ export async function ingestEducationPortalsReport(env: Env, payload: {
   reporterName?: unknown;
   meta?: unknown;
   screenshot?: ScreenshotInput;
+  screenshots?: ScreenshotInput[];
 }): Promise<{ id: string; status: string }> {
   const reporterEmail = normalizeEmail(
     typeof payload.reporterEmail === "string" ? payload.reporterEmail : "",
@@ -245,6 +299,7 @@ export async function ingestEducationPortalsReport(env: Env, payload: {
     reporterName: sanitizePlainText(payload.reporterName, 200) || null,
     meta,
     screenshot: payload.screenshot,
+    screenshots: payload.screenshots,
   });
 }
 
@@ -267,12 +322,18 @@ reports.post("/", requireAuth, requireTester, async (c) => {
   const user = c.get("user");
   const form = await c.req.formData();
 
+  // New multi-element widget sends repeated `screenshots`; older senders send a
+  // single `screenshot`. Accept both.
+  const multi = form.getAll("screenshots").filter(Boolean);
+  const legacy = form.get("screenshot");
+  const screenshots = multi.length > 0 ? multi : legacy ? [legacy] : [];
+
   return persistReport(c, {
     project: String(form.get("project") || "default"),
     reporterEmail: user.email,
     reporterName: user.name,
     meta: parseMeta(form.get("meta")),
-    screenshot: form.get("screenshot"),
+    screenshots,
   });
 });
 
@@ -287,6 +348,7 @@ reports.post("/integrations/education-portals", async (c) => {
   }
 
   const form = await c.req.formData();
+  const multiShots = form.getAll("screenshots").filter(Boolean) as ScreenshotInput[];
   try {
     const result = await ingestEducationPortalsReport(c.env, {
       project: form.get("project"),
@@ -294,6 +356,7 @@ reports.post("/integrations/education-portals", async (c) => {
       reporterName: form.get("reporterName"),
       meta: form.get("meta"),
       screenshot: form.get("screenshot") as ScreenshotInput,
+      screenshots: multiShots.length > 0 ? multiShots : undefined,
     });
     return c.json(result, 201);
   } catch (err) {
@@ -395,15 +458,46 @@ reports.get("/:id", requireAuth, requireTester, async (c) => {
   return c.json({ report });
 });
 
-// GET /:id/screenshot
+// Resolve the ordered list of screenshot R2 keys for a report row, tolerating
+// both the legacy single `screenshot_key` and the new `screenshot_keys` JSON.
+function reportScreenshotKeys(report: { screenshot_key?: string | null; screenshot_keys?: string | null }): string[] {
+  if (report.screenshot_keys) {
+    try {
+      const parsed = JSON.parse(report.screenshot_keys);
+      if (Array.isArray(parsed)) {
+        const keys = parsed.filter((k): k is string => typeof k === "string" && k.length > 0);
+        if (keys.length > 0) return keys;
+      }
+    } catch {
+      /* fall through to legacy */
+    }
+  }
+  return report.screenshot_key ? [report.screenshot_key] : [];
+}
+
+// GET /:id/screenshot — the primary (first) screenshot, for back-compat.
 reports.get("/:id/screenshot", requireAuth, requireTester, async (c) => {
   const id = c.req.param("id");
-  const report = await c.env.DB.prepare("SELECT reporter_email, screenshot_key FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1")
+  const report = await c.env.DB.prepare("SELECT reporter_email, screenshot_key, screenshot_keys FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1")
     .bind(id)
     .first();
   if (!report) return c.json({ error: "Not Found" }, 404);
   if (!(await canAccessReport(c, report as { reporter_email: string }))) return c.json({ error: "Forbidden" }, 403);
-  return serveR2(c, (report as { screenshot_key: string | null }).screenshot_key);
+  return serveR2(c, reportScreenshotKeys(report as { screenshot_key: string | null; screenshot_keys: string | null })[0] ?? null);
+});
+
+// GET /:id/screenshot/:index — the Nth screenshot for multi-element reports.
+reports.get("/:id/screenshot/:index", requireAuth, requireTester, async (c) => {
+  const id = c.req.param("id");
+  const index = Number.parseInt(c.req.param("index") ?? "", 10);
+  const report = await c.env.DB.prepare("SELECT reporter_email, screenshot_key, screenshot_keys FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1")
+    .bind(id)
+    .first();
+  if (!report) return c.json({ error: "Not Found" }, 404);
+  if (!(await canAccessReport(c, report as { reporter_email: string }))) return c.json({ error: "Forbidden" }, 403);
+  const keys = reportScreenshotKeys(report as { screenshot_key: string | null; screenshot_keys: string | null });
+  const key = Number.isInteger(index) && index >= 0 ? keys[index] ?? null : null;
+  return serveR2(c, key);
 });
 
 // GET /:id/logs/:type  (type = console | network)

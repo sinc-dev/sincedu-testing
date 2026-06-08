@@ -29,7 +29,59 @@ export interface ReportDetail extends ReportRow {
   user_agent: string | null;
   element_text: string | null;
   element_rect: string | null;
+  elements: string | null;          // json array of {selector,text,rect}
+  screenshot_keys: string | null;   // json array of R2 keys
   resolution: string | null;
+}
+
+export interface ReportElement {
+  selector: string;
+  text: string;
+  rect: { x: number; y: number; width: number; height: number } | null;
+}
+
+// Parse the elements JSON, falling back to the legacy single-element fields.
+export function parseReportElements(detail: ReportDetail): ReportElement[] {
+  if (detail.elements) {
+    try {
+      const parsed = JSON.parse(detail.elements);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((e): e is ReportElement => Boolean(e) && typeof e === "object" && typeof e.selector === "string")
+          .map((e) => ({ selector: e.selector, text: e.text ?? "", rect: e.rect ?? null }));
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  if (detail.element_selector) {
+    let rect: ReportElement["rect"] = null;
+    if (detail.element_rect) {
+      try {
+        rect = JSON.parse(detail.element_rect);
+      } catch {
+        rect = null;
+      }
+    }
+    return [{ selector: detail.element_selector, text: detail.element_text ?? "", rect }];
+  }
+  return [];
+}
+
+// How many screenshots this report has (new multi key list or legacy single).
+export function reportScreenshotCount(detail: ReportDetail): number {
+  if (detail.screenshot_keys) {
+    try {
+      const parsed = JSON.parse(detail.screenshot_keys);
+      if (Array.isArray(parsed)) {
+        const n = parsed.filter((k) => typeof k === "string" && k.length > 0).length;
+        if (n > 0) return n;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return detail.screenshot_key ? 1 : 0;
 }
 
 export interface TesterRow {
@@ -96,7 +148,15 @@ export async function getReport(token: string, id: string): Promise<ReportDetail
 }
 
 export async function getScreenshotPreview(token: string, id: string): Promise<ScreenshotPreview> {
-  const res = await authFetch(`/api/reports/${id}/screenshot`, token);
+  return fetchScreenshot(`/api/reports/${id}/screenshot`, token);
+}
+
+export async function getScreenshotPreviewAt(token: string, id: string, index: number): Promise<ScreenshotPreview> {
+  return fetchScreenshot(`/api/reports/${id}/screenshot/${index}`, token);
+}
+
+async function fetchScreenshot(path: string, token: string): Promise<ScreenshotPreview> {
+  const res = await authFetch(path, token);
   if (!res.ok) throw new Error("no screenshot");
   const blob = await res.blob();
   const contentType = blob.type || res.headers.get("Content-Type") || "";

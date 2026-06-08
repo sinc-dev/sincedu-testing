@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import {
   getLogs,
   getReport,
-  getScreenshotPreview,
+  getScreenshotPreviewAt,
+  parseReportElements,
   patchReport,
+  reportScreenshotCount,
   type ReportDetail as Detail,
+  type ReportElement,
   type ScreenshotPreview,
 } from "../api";
 
@@ -36,7 +39,8 @@ function shortTitle(value: string): string {
 
 export function ReportDetail({ id, isAdmin, getToken, onClose, onChanged }: Props) {
   const [report, setReport] = useState<Detail | null>(null);
-  const [shotPreview, setShotPreview] = useState<ScreenshotPreview | null>(null);
+  const [elements, setElements] = useState<ReportElement[]>([]);
+  const [shots, setShots] = useState<ScreenshotPreview[]>([]);
   const [consoleLogs, setConsoleLogs] = useState<unknown[]>([]);
   const [networkLogs, setNetworkLogs] = useState<unknown[]>([]);
   const [title, setTitle] = useState("");
@@ -59,13 +63,14 @@ export function ReportDetail({ id, isAdmin, getToken, onClose, onChanged }: Prop
   };
 
   useEffect(() => {
-    let revoke: string | null = null;
+    let revokeUrls: string[] = [];
     (async () => {
       const token = await getToken();
       if (!token) return;
       try {
         const detail = await getReport(token, id);
         setReport(detail);
+        setElements(parseReportElements(detail));
         setTitle(normalizeText(detail.title).replace(/\n+/g, " ").trim().slice(0, TITLE_MAX));
         setNote(normalizeText(detail.note));
         setSeverity(detail.severity || "");
@@ -74,18 +79,25 @@ export function ReportDetail({ id, isAdmin, getToken, onClose, onChanged }: Prop
         setResolution(detail.resolution || "");
         if (detail.console_count > 0) setConsoleLogs(await getLogs(token, id, "console"));
         if (detail.network_count > 0) setNetworkLogs(await getLogs(token, id, "network"));
-        if (detail.screenshot_key) {
-          const preview = await getScreenshotPreview(token, id);
-          revoke = preview.url;
-          setShotPreview(preview);
+        const count = reportScreenshotCount(detail);
+        const previews: ScreenshotPreview[] = [];
+        for (let i = 0; i < count; i += 1) {
+          try {
+            const preview = await getScreenshotPreviewAt(token, id, i);
+            previews.push(preview);
+            revokeUrls.push(preview.url);
+          } catch {
+            /* skip missing screenshot */
+          }
         }
+        setShots(previews);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load report");
       }
     })();
     return () => {
       if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
-      if (revoke) URL.revokeObjectURL(revoke);
+      for (const url of revokeUrls) URL.revokeObjectURL(url);
     };
   }, [id, getToken]);
 
@@ -148,11 +160,17 @@ export function ReportDetail({ id, isAdmin, getToken, onClose, onChanged }: Prop
                 </div>
               ) : null}
 
-              {report.element_selector ? (
+              {elements.length > 0 ? (
                 <div>
-                  <strong>Element</strong>
-                  <p className="mono" style={{ marginTop: 4, wordBreak: "break-all" }}>{report.element_selector}</p>
-                  {report.element_text ? <p className="muted">“{report.element_text}”</p> : null}
+                  <strong>{elements.length > 1 ? `Elements (${elements.length})` : "Element"}</strong>
+                  <div style={{ display: "grid", gap: 8, marginTop: 4 }}>
+                    {elements.map((el, i) => (
+                      <div key={`${el.selector}-${i}`}>
+                        <p className="mono" style={{ wordBreak: "break-all" }}>{el.selector}</p>
+                        {el.text ? <p className="muted">“{el.text}”</p> : null}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 
@@ -165,16 +183,20 @@ export function ReportDetail({ id, isAdmin, getToken, onClose, onChanged }: Prop
                 </div>
               ) : null}
 
-              {shotPreview ? (
+              {shots.length > 0 ? (
                 <div>
-                  <strong>Screenshot</strong>
-                  <a href={shotPreview.url} target="_blank" rel="noreferrer">
-                    {shotPreview.isImage ? (
-                      <img className="shot" src={shotPreview.url} alt="screenshot" style={{ marginTop: 4 }} />
-                    ) : (
-                      <span className="thumb-placeholder" style={{ marginTop: 4 }}>Open screenshot file</span>
-                    )}
-                  </a>
+                  <strong>{shots.length > 1 ? `Screenshots (${shots.length})` : "Screenshot"}</strong>
+                  <div style={{ display: "grid", gap: 8, marginTop: 4 }}>
+                    {shots.map((shot, i) => (
+                      <a key={i} href={shot.url} target="_blank" rel="noreferrer">
+                        {shot.isImage ? (
+                          <img className="shot" src={shot.url} alt={`screenshot ${i + 1}`} />
+                        ) : (
+                          <span className="thumb-placeholder">Open screenshot file</span>
+                        )}
+                      </a>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 

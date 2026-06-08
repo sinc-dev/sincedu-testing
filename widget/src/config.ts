@@ -5,6 +5,10 @@ export interface WidgetConfig {
   mount: string | null;
   position: string;
   reviewUrl: string;
+  // When "supabase", reuse the host app's existing Supabase session (same
+  // project) instead of opening the /auth popup. Falls back to the popup if no
+  // valid host session is found or it isn't accepted.
+  hostAuth: string | null;
 }
 
 function scriptOrigin(scriptEl: HTMLScriptElement | null): string {
@@ -34,5 +38,6 @@ export function readConfig(scriptEl: HTMLScriptElement | null): WidgetConfig {
     mount: ds.mount || null,
     position: ds.position || "bottom-right",
     reviewUrl,
+    hostAuth: ds.hostAuth || null,
   };
 }

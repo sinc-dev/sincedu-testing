@@ -94,6 +94,48 @@ export function cachedEmail(): string | null {
   return cached?.email ?? null;
 }
 
+// When embedded in an app that already runs Supabase auth on the SAME project
+// the worker verifies against, we can reuse that live session instead of
+// opening our /auth popup. Scans localStorage for a persisted Supabase session
+// (any storageKey — supabase-js defaults to `sb-<ref>-auth-token`; @supabase/ssr
+// and custom configs use other names and may base64-wrap the value).
+export function hostSupabaseToken(): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      let raw = localStorage.getItem(key);
+      if (!raw) continue;
+      if (raw.startsWith("base64-")) {
+        try {
+          raw = decodeURIComponent(escape(atob(raw.slice(7))));
+        } catch {
+          continue;
+        }
+      }
+      if (!raw.includes("access_token")) continue;
+      let parsed: any;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      const session = parsed?.currentSession ?? parsed;
+      const access = session?.access_token;
+      if (typeof access !== "string" || !access) continue;
+      // expires_at is in seconds. Skip if missing-and-decodable-expired or near expiry.
+      const expiresAt: number =
+        typeof session?.expires_at === "number" ? session.expires_at * 1000 : decodeExpiry(access);
+      if (expiresAt && expiresAt < Date.now() + 30000) continue;
+      return access;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 // Signs out on our domain (clears the persisted session) and drops the cache.
 export function signOut(authUrl: string): void {
   cached = null;

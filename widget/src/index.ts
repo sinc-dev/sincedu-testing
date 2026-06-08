@@ -1,9 +1,15 @@
 import { readConfig } from "./config.js";
 import { installDiagnostics } from "./diagnostics.js";
-import { pickElementAndCapture, captureViewport, type CapturedTarget } from "./picker.js";
-import { cachedEmail, getToken, signOut } from "./auth.js";
-import { fetchAccess, submitReport } from "./api.js";
-import { WidgetUI } from "./ui.js";
+import {
+  startElementPicker,
+  captureViewport,
+  captureScreenshotWithHighlights,
+  type CapturedTarget,
+  type PickerHandle,
+} from "./picker.js";
+import { cachedEmail, getToken, hostSupabaseToken, signOut } from "./auth.js";
+import { fetchAccess, submitReport, type ReportElement } from "./api.js";
+import { WidgetUI, type CaptureView, type CaptureCardController } from "./ui.js";
 
 declare global {
   interface Window {
@@ -19,112 +25,268 @@ function boot() {
   const config = readConfig(scriptEl);
   installDiagnostics();
   const ui = new WidgetUI();
-  let picking = false;
-  // True while the note card is open, so the ⌥K shortcut / re-entry don't
-  // start a second picker on top of an in-progress report.
-  let noteOpen = false;
 
-  // Sign in + allowlist gate, shared by every capture entry point. Returns the
-  // auth handle, or null after showing the appropriate toast.
-  async function authorize(): Promise<{ token: string } | null> {
-    // Identity — sign in via our /auth popup (host domain never touches the auth provider).
+  // ---- Session state ----
+  let pickerHandle: PickerHandle | null = null;
+  let captures: CapturedTarget[] = [];
+  let card: CaptureCardController | null = null;
+  let token: string | null = null;
+  // How the current session authorized: reuse the host's Supabase session, or
+  // our /auth popup. Drives where the send path gets its (refreshed) token.
+  let authMode: "host" | "popup" | null = null;
+  let pending = 0;
+  let sentTimer: number | null = null;
+  // Object URLs for capture screenshots, so previews render and we can revoke.
+  const shotUrls = new Map<CapturedTarget, string>();
+
+  const urlFor = (cap: CapturedTarget): string | null => {
+    if (!cap.screenshot) return null;
+    let url = shotUrls.get(cap);
+    if (!url) {
+      url = URL.createObjectURL(cap.screenshot);
+      shotUrls.set(cap, url);
+    }
+    return url;
+  };
+
+  const revokeUrl = (cap: CapturedTarget) => {
+    const url = shotUrls.get(cap);
+    if (url) URL.revokeObjectURL(url);
+    shotUrls.delete(cap);
+  };
+
+  const captureViews = (): CaptureView[] =>
+    captures.map((cap) => ({ selector: cap.selector, screenshotUrl: urlFor(cap) }));
+
+  const refreshCard = () => card?.setCaptures(captureViews());
+
+  // Tear down the whole session: picker, card, captures, object URLs.
+  const endSession = () => {
+    pickerHandle?.stop();
+    pickerHandle = null;
+    card?.close();
+    card = null;
+    for (const cap of captures) revokeUrl(cap);
+    captures = [];
+    ui.setLauncherActive(false);
+  };
+
+  // Sign in + allowlist gate, shared by every capture entry point.
+  async function authorize(): Promise<string | null> {
+    // Preferred: reuse the host app's existing Supabase session (same project),
+    // so the tester is never bounced to our /auth popup.
+    if (config.hostAuth === "supabase") {
+      const host = hostSupabaseToken();
+      if (host) {
+        try {
+          const access = await fetchAccess(config.apiBase, host);
+          if (!access.isTester) {
+            ui.showToast("Your account isn't on the tester allowlist");
+            return null;
+          }
+          token = host;
+          authMode = "host";
+          return host;
+        } catch {
+          // Host token wasn't accepted (e.g. different project / expired) —
+          // fall through to the popup.
+        }
+      }
+    }
+
     const auth = await getToken(config.authUrl);
     if (!auth) {
       ui.showToast("Sign-in required");
       return null;
     }
-    // Allowlist (server is source of truth).
     const access = await fetchAccess(config.apiBase, auth.token);
     if (!access.isTester) {
       ui.showToast("Your account isn't on the tester allowlist");
       return null;
     }
-    return auth;
+    token = auth.token;
+    authMode = "popup";
+    return auth.token;
   }
 
-  // Inline note box at the cursor, with a screenshot preview/lightbox and an
-  // optional "Retake" that re-runs the same capture flow.
-  function openNoteCard(captured: CapturedTarget, auth: { token: string }, restart?: () => void) {
-    const screenshotUrl = URL.createObjectURL(captured.screenshot);
-    let revoked = false;
-    const revoke = () => {
-      if (revoked) return;
-      revoked = true;
-      URL.revokeObjectURL(screenshotUrl);
-    };
+  // A current token for the send path. Re-reads the host session (the host's
+  // supabase-js auto-refreshes it) or refreshes via the popup cache.
+  async function freshToken(): Promise<string | null> {
+    if (authMode === "host") return hostSupabaseToken() || token;
+    return (await getToken(config.authUrl))?.token || token;
+  }
 
-    const controller = ui.showNoteCard({
-      pointer: captured.pointer,
-      selector: captured.selector,
-      screenshotUrl,
-      onRetake: restart
-        ? () => {
-            noteOpen = false;
-            revoke();
-            restart();
-          }
-        : undefined,
-      onCancel: () => {
-        noteOpen = false;
-        revoke();
+  const openCard = (pointer: { x: number; y: number }) => {
+    if (card) {
+      refreshCard();
+      return;
+    }
+    card = ui.showCaptureCard({
+      pointer,
+      onSend: ({ note, severity }) => {
+        const targets = captures.slice();
+        // Detach captures from the session so endSession doesn't revoke the
+        // screenshots we still need for the async send.
+        captures = [];
+        const urls = new Map(shotUrls);
+        shotUrls.clear();
+        endSession();
+        // Revoke preview URLs now that the card is gone — the send re-uses the
+        // File objects, not the object URLs.
+        for (const url of urls.values()) URL.revokeObjectURL(url);
+        void enqueueSend(targets, note, severity);
       },
-      onSend: async ({ note, severity }) => {
-        controller.setBusy(true);
-        try {
-          const fresh = (await getToken(config.authUrl)) || auth;
-          await submitReport({ apiBase: config.apiBase, token: fresh.token, project: config.project, note, severity, captured });
-          controller.close();
-          noteOpen = false;
-          revoke();
-          ui.showToast("Report sent", true);
-        } catch (error) {
-          controller.setBusy(false);
-          controller.setError(error instanceof Error ? error.message : "Failed to send");
+      onCancel: () => endSession(),
+      onAddAnother: () => {
+        // Resume the running picker, or start one if the card was opened from a
+        // viewport-only capture (context menu) with no picker behind it.
+        if (pickerHandle?.isActive()) pickerHandle.resume();
+        else beginPicker();
+      },
+      onAttachViewport: () => void attachViewport(),
+      onRemoveCapture: (index) => {
+        const [removed] = captures.splice(index, 1);
+        if (removed) revokeUrl(removed);
+        if (captures.length === 0) {
+          card?.close();
+          card = null;
+          pickerHandle?.resume();
+        } else {
+          refreshCard();
         }
       },
+      onPreview: (index) => {
+        const url = urlFor(captures[index]);
+        if (url) ui.showLightbox(url);
+      },
     });
-    noteOpen = true;
-  }
+    refreshCard();
+  };
 
-  async function startPicker() {
-    if (picking || noteOpen) return;
-    picking = true;
+  // Capture the current viewport and add it as a screenshot-only entry.
+  async function attachViewport() {
     try {
-      const auth = await authorize();
-      if (!auth) return;
-
-      // Pick an element + capture screenshot. Highlight the launcher while the
-      // picker is live; clear it however the pick resolves (Esc too).
-      ui.setLauncherActive(true);
-      let captured: CapturedTarget | null = null;
-      try {
-        captured = await pickElementAndCapture();
-      } finally {
-        ui.setLauncherActive(false);
-      }
-      if (!captured) return;
-
-      openNoteCard(captured, auth, () => void startPicker());
-    } finally {
-      picking = false;
+      const file = await captureViewport();
+      const synthetic: CapturedTarget = {
+        selector: "(viewport)",
+        text: "",
+        rect: { x: 0, y: 0, width: innerWidth, height: innerHeight },
+        pointer: { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) },
+        element: document.body,
+        screenshot: file,
+      };
+      captures.push(synthetic);
+      refreshCard();
+    } catch {
+      card?.setError("Screenshot capture failed");
     }
   }
 
-  // Capture the whole viewport (no element to highlight) and open the note box.
-  async function captureViewportFlow() {
-    if (picking || noteOpen) return;
-    picking = true;
+  function flashSent() {
+    ui.setLauncherStatus({ sent: true });
+    if (sentTimer) window.clearTimeout(sentTimer);
+    sentTimer = window.setTimeout(() => {
+      if (pending === 0) ui.setLauncherStatus({});
+    }, 3000);
+  }
+
+  // Take the send-time screenshot (all picked elements outlined) and submit.
+  async function enqueueSend(targets: CapturedTarget[], note: string, severity: string) {
+    if (targets.length === 0) return;
+    pending += 1;
+    ui.setLauncherStatus({ pending });
+
     try {
-      const auth = await authorize();
-      if (!auth) return;
-      const captured = await captureViewport();
-      if (!captured) {
-        ui.showToast("Screenshot capture failed");
-        return;
+      const realElements = targets
+        .filter((t) => t.selector !== "(viewport)" && t.element instanceof Element && document.contains(t.element))
+        .map((t) => t.element);
+
+      let sendTimeShot: File | null = null;
+      let screenshotError: string | undefined;
+      try {
+        sendTimeShot = await captureScreenshotWithHighlights(realElements);
+      } catch (err) {
+        screenshotError = err instanceof Error ? err.message : "Screenshot capture failed";
       }
-      openNoteCard(captured, auth, () => void captureViewportFlow());
-    } finally {
-      picking = false;
+
+      const manualShots = targets
+        .map((t) => t.screenshot)
+        .filter((s): s is File => Boolean(s));
+      const screenshots = sendTimeShot ? [sendTimeShot, ...manualShots] : manualShots;
+
+      const elements: ReportElement[] = targets
+        .filter((t) => t.selector !== "(viewport)")
+        .map((t) => ({ selector: t.selector, text: t.text, rect: t.rect }));
+
+      const fresh = await freshToken();
+      if (!fresh) throw new Error("Sign-in required");
+
+      await submitReport({
+        apiBase: config.apiBase,
+        token: fresh,
+        project: config.project,
+        note,
+        severity,
+        screenshots,
+        elements,
+        screenshotError,
+      });
+
+      pending -= 1;
+      if (pending > 0) ui.setLauncherStatus({ pending });
+      else flashSent();
+      ui.showToast("Report sent", true);
+    } catch (error) {
+      pending -= 1;
+      ui.setLauncherStatus(pending > 0 ? { pending } : { error: true });
+      ui.showToast(error instanceof Error ? error.message : "Failed to send report");
+    }
+  }
+
+  // Start (or restart) the element picker for the current session. Assumes the
+  // tester is already authorized.
+  function beginPicker() {
+    ui.setLauncherActive(true);
+    pickerHandle = startElementPicker({
+      onPick: (target) => {
+        captures.push(target);
+        if (card) refreshCard();
+        else openCard(target.pointer);
+      },
+      onCancel: () => endSession(),
+    });
+  }
+
+  async function startPicker() {
+    // Toggle off if already running.
+    if (pickerHandle?.isActive()) {
+      endSession();
+      return;
+    }
+    const auth = await authorize();
+    if (!auth) return;
+    beginPicker();
+  }
+
+  // Viewport-only flow from the context menu: capture, then open the card.
+  async function captureViewportFlow() {
+    if (pickerHandle?.isActive() || card) return;
+    const auth = await authorize();
+    if (!auth) return;
+    try {
+      const file = await captureViewport();
+      const synthetic: CapturedTarget = {
+        selector: "(viewport)",
+        text: "",
+        rect: { x: 0, y: 0, width: innerWidth, height: innerHeight },
+        pointer: { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) },
+        element: document.body,
+        screenshot: file,
+      };
+      captures.push(synthetic);
+      openCard(synthetic.pointer);
+    } catch {
+      ui.showToast("Screenshot capture failed");
     }
   }
 
@@ -151,10 +313,7 @@ function boot() {
     onContextMenu: openContextMenu,
   });
 
-  // Keyboard shortcut: Option/Alt + K starts the picker. Skips when the user
-  // is typing in a field so it doesn't fire mid-form-fill. Uses event.code so
-  // the binding survives Option-altered layouts on macOS (where Option+K
-  // produces "˚" for event.key).
+  // ⌥K toggles the picker, unless the user is typing in a field.
   window.addEventListener("keydown", (event) => {
     if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     if (event.code !== "KeyK") return;

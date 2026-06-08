@@ -9,6 +9,20 @@ import { WIDGET_JS } from "./generated/widgetBundle.js";
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+// Origins always allowed regardless of ALLOWED_ORIGINS config:
+// - any localhost / 127.0.0.1 origin (local dev on any port/scheme)
+// - the SINC Daily Reports app (prod)
+const ALWAYS_ALLOWED = ["https://sinc-daily-reports.web.app"];
+
+function isLocalhostOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
 // CORS: the widget runs on arbitrary host origins, so allow the configured
 // origins (or "*") for the API surface. Auth is via bearer token, not cookies,
 // so credentials are not needed.
@@ -20,6 +34,7 @@ app.use("*", async (c, next) => {
   const handler = cors({
     origin: (origin) => {
       if (allowed.includes("*")) return origin || "*";
+      if (origin && (isLocalhostOrigin(origin) || ALWAYS_ALLOWED.includes(origin))) return origin;
       return origin && allowed.includes(origin) ? origin : "";
     },
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
@@ -75,6 +90,7 @@ export default class SincEduTestingWorker extends WorkerEntrypoint<Env> {
     reporterName?: unknown;
     meta?: unknown;
     screenshot?: { bytes: ArrayBuffer; type?: string } | null;
+    screenshots?: Array<{ bytes: ArrayBuffer; type?: string }>;
   }): Promise<{ id: string; status: string }> {
     return ingestEducationPortalsReport(this.env, payload);
   }
