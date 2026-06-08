@@ -110,6 +110,8 @@ export interface CaptureCardOptions {
   onAttachViewport: () => void;
   onRemoveCapture: (index: number) => void;
   onPreview: (index: number) => void;
+  // An image was pasted into the note — attach it as a screenshot capture.
+  onPasteImage: (file: File) => void;
 }
 
 export interface CaptureCardController {
@@ -438,6 +440,23 @@ export class WidgetUI {
         textarea.value = cleaned;
         const next = Math.min(caret, cleaned.length);
         textarea.selectionStart = textarea.selectionEnd = next;
+      }
+    });
+
+    // Paste an image from the clipboard (e.g. a screenshot) to attach it. Text
+    // paste is left to the browser's default handling.
+    textarea.addEventListener("paste", (event) => {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        event.preventDefault();
+        const ext = (blob.type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+        const file = new File([blob], `pasted-${Date.now()}.${ext}`, { type: blob.type });
+        opts.onPasteImage(file);
+        return;
       }
     });
 

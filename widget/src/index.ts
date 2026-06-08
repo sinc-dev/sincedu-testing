@@ -159,6 +159,18 @@ function boot() {
         const url = urlFor(captures[index]);
         if (url) ui.showLightbox(url);
       },
+      onPasteImage: (file) => {
+        captures.push({
+          selector: "(pasted image)",
+          text: "",
+          rect: { x: 0, y: 0, width: 0, height: 0 },
+          pointer: { x: 0, y: 0 },
+          element: document.body,
+          screenshot: file,
+        });
+        refreshCard();
+        ui.showToast("Image attached", true);
+      },
     });
     refreshCard();
   };
@@ -197,25 +209,33 @@ function boot() {
     ui.setLauncherStatus({ pending });
 
     try {
+      // Synthetic captures (viewport / pasted image) use a placeholder element;
+      // only outline & report real picked DOM elements (selectors not in parens).
+      const isReal = (t: CapturedTarget) => !t.selector.startsWith("(");
       const realElements = targets
-        .filter((t) => t.selector !== "(viewport)" && t.element instanceof Element && document.contains(t.element))
+        .filter((t) => isReal(t) && t.element instanceof Element && document.contains(t.element))
         .map((t) => t.element);
-
-      let sendTimeShot: File | null = null;
-      let screenshotError: string | undefined;
-      try {
-        sendTimeShot = await captureScreenshotWithHighlights(realElements);
-      } catch (err) {
-        screenshotError = err instanceof Error ? err.message : "Screenshot capture failed";
-      }
 
       const manualShots = targets
         .map((t) => t.screenshot)
         .filter((s): s is File => Boolean(s));
+
+      // Take a fresh overview (all picked elements outlined) when there are real
+      // elements to show. A viewport/pasted-only report already carries its image.
+      let sendTimeShot: File | null = null;
+      let screenshotError: string | undefined;
+      if (realElements.length > 0 || manualShots.length === 0) {
+        try {
+          sendTimeShot = await captureScreenshotWithHighlights(realElements);
+        } catch (err) {
+          screenshotError = err instanceof Error ? err.message : "Screenshot capture failed";
+        }
+      }
+
       const screenshots = sendTimeShot ? [sendTimeShot, ...manualShots] : manualShots;
 
       const elements: ReportElement[] = targets
-        .filter((t) => t.selector !== "(viewport)")
+        .filter(isReal)
         .map((t) => ({ selector: t.selector, text: t.text, rect: t.rect }));
 
       const fresh = await freshToken();
