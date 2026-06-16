@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { bulkPatchReports, getScreenshotPreview, listReports, patchReport, type ReportRow, type ScreenshotPreview } from "../api";
 import { ReportDetail } from "./ReportDetail";
 import { EmptyReports } from "./Illustrations";
@@ -7,6 +7,7 @@ const STATUSES = ["open", "investigating", "in_progress", "fixed", "resolved", "
 const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 const DONE_STATUSES = new Set(["fixed", "resolved", "closed"]);
 const ACTIVE_STATUSES = new Set(["investigating", "in_progress"]);
+const ROWS_PER_PAGE_OPTIONS = [10, 25, 50, 100] as const;
 
 type StatusFilter = "all" | "open" | "active" | "done";
 type SeverityFilter = "all" | typeof SEVERITIES[number];
@@ -71,6 +72,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
   const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [filters, setFilters] = useState<ReportFilters>(DEFAULT_FILTERS);
+  const [page, setPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState<number>(25);
   const openReport = (id: string) => setSelected(id);
   const reporterOptions = [...new Set(reports.map((report) => report.reporter_email).filter(Boolean))].sort();
   const projectOptions = [...new Set(reports.map((report) => report.project).filter(Boolean))].sort();
@@ -90,15 +93,24 @@ export function ReportsView({ isAdmin, getToken }: Props) {
     return Boolean(report.screenshot_key);
   };
 
-  const filteredReports = reports.filter((report) => (
+  const filteredReports = useMemo(() => reports.filter((report) => (
     matchesStatus(report, filters.status)
     && (filters.severity === "all" || report.severity === filters.severity)
     && matchesEvidence(report, filters.evidence)
     && (filters.reporter === "all" || report.reporter_email === filters.reporter)
     && (filters.project === "all" || report.project === filters.project)
     && (filters.domains.length === 0 || filters.domains.includes(getDomain(report.page_url)))
-  ));
-  const visibleIds = filteredReports.map((report) => report.id);
+  )), [filters, reports]);
+  const totalPages = Math.max(1, Math.ceil(filteredReports.length / rowsPerPage));
+  const currentPage = Math.min(page, totalPages);
+  const pageStartIndex = (currentPage - 1) * rowsPerPage;
+  const paginatedReports = useMemo(
+    () => filteredReports.slice(pageStartIndex, pageStartIndex + rowsPerPage),
+    [filteredReports, pageStartIndex, rowsPerPage],
+  );
+  const pageStartLabel = filteredReports.length === 0 ? 0 : pageStartIndex + 1;
+  const pageEndLabel = Math.min(pageStartIndex + rowsPerPage, filteredReports.length);
+  const visibleIds = paginatedReports.map((report) => report.id);
   const visibleSelectedCount = visibleIds.filter((id) => selectedIds.has(id)).length;
   const allVisibleSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
   const selectedCount = selectedIds.size;
@@ -132,6 +144,14 @@ export function ReportsView({ isAdmin, getToken }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filters, rowsPerPage]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
   useEffect(() => {
     setSelectedIds((current) => {
@@ -231,7 +251,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
       return {};
     });
 
-    const screenshotReports = reports.filter((report) => report.screenshot_key);
+    const screenshotReports = paginatedReports.filter((report) => report.screenshot_key);
     if (screenshotReports.length === 0) return undefined;
 
     (async () => {
@@ -261,7 +281,40 @@ export function ReportsView({ isAdmin, getToken }: Props) {
       active = false;
       urls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [reports, getToken]);
+  }, [paginatedReports, getToken]);
+
+  const goToPage = (nextPage: number) => {
+    setPage(Math.min(Math.max(nextPage, 1), totalPages));
+  };
+
+  const paginationControls = filteredReports.length > 0 ? (
+    <div className="pagination-bar" aria-label="Report pagination">
+      <div className="pagination-summary">
+        <strong>{pageStartLabel}-{pageEndLabel}</strong>
+        <span>of {filteredReports.length}</span>
+        {filteredReports.length !== reports.length ? <span>filtered from {reports.length}</span> : null}
+      </div>
+      <label className="rows-control">
+        <span>Rows</span>
+        <select
+          value={rowsPerPage}
+          aria-label="Rows per page"
+          onChange={(event) => setRowsPerPage(Number(event.target.value))}
+        >
+          {ROWS_PER_PAGE_OPTIONS.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      </label>
+      <div className="page-controls">
+        <button className="page-btn" type="button" onClick={() => goToPage(1)} disabled={currentPage === 1} aria-label="First page">«</button>
+        <button className="page-btn" type="button" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1} aria-label="Previous page">‹</button>
+        <span className="page-count">Page {currentPage} of {totalPages}</span>
+        <button className="page-btn" type="button" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages} aria-label="Next page">›</button>
+        <button className="page-btn" type="button" onClick={() => goToPage(totalPages)} disabled={currentPage === totalPages} aria-label="Last page">»</button>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="card">
@@ -388,6 +441,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
           </select>
         ) : null}
       </div>
+      {paginationControls}
       {error ? (
         <div className="error-banner" role="alert">
           <div>
@@ -459,7 +513,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
               </tr>
             </thead>
             <tbody>
-              {filteredReports.map((r) => (
+              {paginatedReports.map((r) => (
                 <tr key={r.id}>
                   <td className="select-cell" onClick={(event) => event.stopPropagation()}>
                     <input
@@ -535,6 +589,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
           </table>
         </div>
       )}
+      {paginationControls}
 
       {selected ? (
         <ReportDetail

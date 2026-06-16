@@ -9,6 +9,10 @@ export interface WidgetConfig {
   // project) instead of opening the /auth popup. Falls back to the popup if no
   // valid host session is found or it isn't accepted.
   hostAuth: string | null;
+  // Optional local-dev sink URL. When set AND running on localhost, reports are
+  // POSTed here (as JSON with inline base64 screenshots) instead of going to the
+  // worker/R2 — e.g. a Vite dev-server endpoint that writes them to the codebase.
+  localSink: string | null;
 }
 
 function scriptOrigin(scriptEl: HTMLScriptElement | null): string {
@@ -39,5 +43,6 @@ export function readConfig(scriptEl: HTMLScriptElement | null): WidgetConfig {
     position: ds.position || "bottom-right",
     reviewUrl,
     hostAuth: ds.hostAuth || null,
+    localSink: (ds.localSink || "").trim() || null,
   };
 }

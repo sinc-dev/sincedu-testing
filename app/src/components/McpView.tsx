@@ -93,7 +93,7 @@ export function McpView({ getToken }: Props) {
   return (
     <div className="mcp-page">
       <section className="card mcp-hero">
-        <div>
+        <div className="mcp-hero-copy">
           <p className="eyebrow">MCP access</p>
           <h2>Connect your AI agent to testing reports</h2>
           <p className="muted">
@@ -126,7 +126,7 @@ export function McpView({ getToken }: Props) {
       ) : null}
 
       <section className="mcp-grid">
-        <div className="card">
+        <div className="card mcp-form-card">
           <h3 style={{ marginTop: 0 }}>Create token</h3>
           <form className="mcp-token-form" onSubmit={create}>
             <label className="field">
@@ -137,7 +137,7 @@ export function McpView({ getToken }: Props) {
           </form>
         </div>
 
-        <div className="card">
+        <div className="card mcp-config-card">
           <h3 style={{ marginTop: 0 }}>Agent config</h3>
           <pre className="code-block">{sampleConfig}</pre>
           <button className="btn ghost" type="button" onClick={() => void copy(sampleConfig, "config")}>

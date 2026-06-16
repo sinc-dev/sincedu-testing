@@ -21,8 +21,13 @@ export default function App() {
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [section, setSection] = useState<"reports" | "mcp" | "allowlist">("reports");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const tokenGetter = useCallback(() => getToken(), [getToken]);
+  const chooseSection = useCallback((next: "reports" | "mcp" | "allowlist") => {
+    setSection(next);
+    setMobileNavOpen(false);
+  }, []);
   const handleSignIn = useCallback(async () => {
     setSignInError("");
     setIsSigningIn(true);
@@ -45,6 +50,7 @@ export default function App() {
       setAccess(null);
       setIsSigningIn(false);
       setUserMenuOpen(false);
+      setMobileNavOpen(false);
       return;
     }
     (async () => {
@@ -88,7 +94,20 @@ export default function App() {
   return (
     <>
       <div className="topbar">
-        <span className="brand">SINC EDU · Testing</span>
+        <div className="topbar-left">
+          {access?.isTester ? (
+            <button
+              className="nav-drawer-toggle"
+              type="button"
+              aria-label="Open testing navigation"
+              aria-expanded={mobileNavOpen}
+              onClick={() => setMobileNavOpen(true)}
+            >
+              <span aria-hidden="true">☰</span>
+            </button>
+          ) : null}
+          <span className="brand">SINC EDU · Testing</span>
+        </div>
         <div className="right user-menu-wrap" onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) setUserMenuOpen(false);
         }}>
@@ -118,6 +137,14 @@ export default function App() {
           ) : null}
         </div>
       </div>
+      {access?.isTester && mobileNavOpen ? (
+        <button
+          className="nav-drawer-backdrop"
+          type="button"
+          aria-label="Close testing navigation"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      ) : null}
 
       <div className="container">
         {accessError ? <p style={{ color: "#dc2626" }}>{accessError}</p> : null}
@@ -131,17 +158,43 @@ export default function App() {
         ) : (
           <>
             <div className="portal-shell">
-              <aside className="side-nav" aria-label="Testing navigation">
-                <button className={`side-nav-item ${section === "reports" ? "active" : ""}`} onClick={() => setSection("reports")}>
+              <aside className={`side-nav ${mobileNavOpen ? "open" : ""}`} aria-label="Testing navigation">
+                <div className="nav-drawer-header">
+                  <strong>Navigation</strong>
+                  <button
+                    className="icon-btn drawer-close"
+                    type="button"
+                    aria-label="Close testing navigation"
+                    onClick={() => setMobileNavOpen(false)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <button
+                  className={`side-nav-item ${section === "reports" ? "active" : ""}`}
+                  onClick={() => chooseSection("reports")}
+                  title="Reports"
+                  aria-label="Reports"
+                >
                   <span className="side-nav-icon" aria-hidden="true">□</span>
                   <span>Reports</span>
                 </button>
-                <button className={`side-nav-item ${section === "mcp" ? "active" : ""}`} onClick={() => setSection("mcp")}>
+                <button
+                  className={`side-nav-item ${section === "mcp" ? "active" : ""}`}
+                  onClick={() => chooseSection("mcp")}
+                  title="MCP access"
+                  aria-label="MCP access"
+                >
                   <span className="side-nav-icon" aria-hidden="true">⌁</span>
                   <span>MCP access</span>
                 </button>
                 {access.isAdmin ? (
-                  <button className={`side-nav-item ${section === "allowlist" ? "active" : ""}`} onClick={() => setSection("allowlist")}>
+                  <button
+                    className={`side-nav-item ${section === "allowlist" ? "active" : ""}`}
+                    onClick={() => chooseSection("allowlist")}
+                    title="Allowlist"
+                    aria-label="Allowlist"
+                  >
                     <span className="side-nav-icon" aria-hidden="true">+</span>
                     <span>Allowlist</span>
                   </button>

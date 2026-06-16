@@ -8,7 +8,7 @@ import {
   type PickerHandle,
 } from "./picker.js";
 import { cachedEmail, getToken, hostSupabaseToken, signOut } from "./auth.js";
-import { fetchAccess, submitReport, type ReportElement } from "./api.js";
+import { fetchAccess, submitReport, submitReportLocal, type ReportElement } from "./api.js";
 import { WidgetUI, type CaptureView, type CaptureCardController } from "./ui.js";
 
 declare global {
@@ -20,6 +20,11 @@ declare global {
 }
 
 const scriptEl = document.currentScript as HTMLScriptElement | null;
+
+// Sentinel returned by authorize() on localhost so the picker proceeds without a
+// real token. The worker accepts reports from localhost origins unauthenticated,
+// and the send path omits the Authorization header for this mode (see enqueueSend).
+const LOCAL_TOKEN = "local-dev";
 
 function isLocalhost(): boolean {
   const h = location.hostname;
@@ -36,9 +41,10 @@ function boot() {
   let captures: CapturedTarget[] = [];
   let card: CaptureCardController | null = null;
   let token: string | null = null;
-  // How the current session authorized: reuse the host's Supabase session, or
-  // our /auth popup. Drives where the send path gets its (refreshed) token.
-  let authMode: "host" | "popup" | null = null;
+  // How the current session authorized: reuse the host's Supabase session, our
+  // /auth popup, or unauthenticated local dev. Drives where the send path gets
+  // its (refreshed) token.
+  let authMode: "host" | "popup" | "local" | null = null;
   let pending = 0;
   let sentTimer: number | null = null;
   // Object URLs for capture screenshots, so previews render and we can revoke.
@@ -99,12 +105,13 @@ function boot() {
       }
     }
 
-    // On localhost the /auth popup to testing.sincedu.com is unwanted — the
-    // tester is expected to already be signed into the host app (same Supabase
-    // project). Don't redirect; tell them to sign in to the app instead.
+    // On localhost, allow capture without any sign-in. The worker accepts
+    // reports from localhost origins and attributes them to a local reporter,
+    // so local dev needs neither a tester account nor the /auth popup.
     if (isLocalhost()) {
-      ui.showToast("Sign in to the app first to use tester capture");
-      return null;
+      token = null;
+      authMode = "local";
+      return LOCAL_TOKEN;
     }
 
     const auth = await getToken(config.authUrl);
@@ -125,6 +132,7 @@ function boot() {
   // A current token for the send path. Re-reads the host session (the host's
   // supabase-js auto-refreshes it) or refreshes via the popup cache.
   async function freshToken(): Promise<string | null> {
+    if (authMode === "local") return LOCAL_TOKEN;
     if (authMode === "host") return hostSupabaseToken() || token;
     return (await getToken(config.authUrl))?.token || token;
   }
@@ -148,6 +156,10 @@ function boot() {
         // File objects, not the object URLs.
         for (const url of urls.values()) URL.revokeObjectURL(url);
         void enqueueSend(targets, note, severity);
+        // Keep the session going: immediately re-arm the picker so the tester
+        // can pick the next element without re-toggling the launcher. The send
+        // runs async in the background.
+        beginPicker();
       },
       onCancel: () => endSession(),
       onAddAnother: () => {
@@ -251,24 +263,38 @@ function boot() {
         .filter(isReal)
         .map((t) => ({ selector: t.selector, text: t.text, rect: t.rect }));
 
-      const fresh = await freshToken();
-      if (!fresh) throw new Error("Sign-in required");
+      // Local dev with a configured sink: write to the local codebase instead of
+      // the worker/R2.
+      if (authMode === "local" && config.localSink) {
+        await submitReportLocal(config.localSink, {
+          project: config.project,
+          note,
+          severity,
+          screenshots,
+          elements,
+          screenshotError,
+        });
+      } else {
+        const fresh = await freshToken();
+        if (!fresh) throw new Error("Sign-in required");
 
-      await submitReport({
-        apiBase: config.apiBase,
-        token: fresh,
-        project: config.project,
-        note,
-        severity,
-        screenshots,
-        elements,
-        screenshotError,
-      });
+        await submitReport({
+          apiBase: config.apiBase,
+          // Local dev submits unauthenticated; send no bearer (worker trusts the origin).
+          token: authMode === "local" ? "" : fresh,
+          project: config.project,
+          note,
+          severity,
+          screenshots,
+          elements,
+          screenshotError,
+        });
+      }
 
       pending -= 1;
       if (pending > 0) ui.setLauncherStatus({ pending });
       else flashSent();
-      ui.showToast("Report sent", true);
+      ui.showToast(authMode === "local" && config.localSink ? "Saved locally" : "Report sent", true);
     } catch (error) {
       pending -= 1;
       ui.setLauncherStatus(pending > 0 ? { pending } : { error: true });

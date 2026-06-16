@@ -155,6 +155,39 @@ export function captureViewport(): Promise<File> {
   return captureScreenshotWithHighlights([]);
 }
 
+// Capture an arbitrary rectangular region of the page (viewport coordinates) —
+// used by the drag-to-select-area gesture. Renders document.body shifted so the
+// region's top-left lands at (0,0) and clipped to the region's size.
+export async function captureArea(area: ElementRect): Promise<File> {
+  const scrollX = window.scrollX || window.pageXOffset || 0;
+  const scrollY = window.scrollY || window.pageYOffset || 0;
+
+  // Clamp the output canvas to MAX_CANVAS_EDGE_PX; allow up to 2x for crisp
+  // captures of small regions (retina-quality), but never exceed the edge cap.
+  const longestEdge = Math.max(area.width, area.height);
+  const maxScale = MAX_CANVAS_EDGE_PX / Math.max(longestEdge, 1);
+  const scale = Math.max(0.5, Math.min(2, maxScale));
+
+  const blob = await domToBlob(document.body, {
+    type: "image/jpeg",
+    quality: 0.9,
+    scale,
+    width: area.width,
+    height: area.height,
+    backgroundColor: "#ffffff",
+    filter: shouldIncludeInScreenshot,
+    style: {
+      transform: `translate(${-(scrollX + area.x)}px, ${-(scrollY + area.y)}px)`,
+      transformOrigin: "top left",
+    },
+  });
+
+  if (!blob || blob.size < MIN_VALID_BLOB_SIZE) {
+    throw new Error("Area capture returned an empty image.");
+  }
+  return new File([blob], `area-${Date.now()}.jpg`, { type: "image/jpeg" });
+}
+
 // Starts a persistent element-picking mode. Hover highlights, click selects.
 // Picking pauses the listeners (the caller resumes via the handle after
 // handling the pick). Esc cancels the picker entirely.
@@ -178,7 +211,9 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
 
   const hint = document.createElement("div");
   hint.setAttribute(IGNORE_ATTR, "true");
-  hint.textContent = "Click an element to attach it · Esc to cancel";
+  const HINT_DEFAULT = "Click or press Enter on an element · drag to select an area · Esc to cancel";
+  const HINT_AREA = "Release to capture area · Esc to cancel";
+  hint.textContent = HINT_DEFAULT;
   hint.style.cssText = [
     "position:fixed",
     "top:16px",
@@ -201,19 +236,59 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
   let paused = false;
   let active = true;
 
-  const onMove = (event: MouseEvent) => {
-    if (paused) return;
+  // Drag-to-select-area state. A press that moves past DRAG_THRESHOLD becomes an
+  // area selection (marquee); a press that doesn't is treated as an element click.
+  const DRAG_THRESHOLD = 6;
+  let startPt: { x: number; y: number } | null = null;
+  let pressing = false;
+  let isArea = false;
+  // A selection happens on mouseup; the browser then fires a synthetic `click`.
+  // Swallow that one click so it can't activate the underlying page element.
+  let suppressClick = false;
+
+  const showHover = (event: MouseEvent) => {
     const el = document.elementFromPoint(event.clientX, event.clientY);
     if (!el || el === highlight || el === hint) return;
     // Ignore the widget's own UI.
     if (el.closest(`[${IGNORE_ATTR}]`)) return;
     currentTarget = el;
     const rect = el.getBoundingClientRect();
+    highlight.style.transition = "all 60ms ease";
     highlight.style.display = "block";
     highlight.style.top = `${rect.top}px`;
     highlight.style.left = `${rect.left}px`;
     highlight.style.width = `${rect.width}px`;
     highlight.style.height = `${rect.height}px`;
+  };
+
+  // Marquee rect (in viewport coords) from the drag start to the current point.
+  const areaRectFrom = (start: { x: number; y: number }, event: MouseEvent): ElementRect => ({
+    x: Math.min(start.x, event.clientX),
+    y: Math.min(start.y, event.clientY),
+    width: Math.abs(event.clientX - start.x),
+    height: Math.abs(event.clientY - start.y),
+  });
+
+  const onMove = (event: MouseEvent) => {
+    if (paused) return;
+    if (pressing && startPt) {
+      const moved = Math.hypot(event.clientX - startPt.x, event.clientY - startPt.y);
+      if (!isArea && moved > DRAG_THRESHOLD) {
+        isArea = true;
+        hint.textContent = HINT_AREA;
+        highlight.style.transition = "none";
+      }
+      if (isArea) {
+        const r = areaRectFrom(startPt, event);
+        highlight.style.display = "block";
+        highlight.style.top = `${r.y}px`;
+        highlight.style.left = `${r.x}px`;
+        highlight.style.width = `${r.width}px`;
+        highlight.style.height = `${r.height}px`;
+      }
+      return; // suppress hover-highlight while a press is in progress
+    }
+    showHover(event);
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -226,31 +301,48 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
       event.stopImmediatePropagation?.();
       stop();
       options.onCancel?.();
+      return;
+    }
+    // Enter selects the currently-highlighted element (keyboard equivalent of a
+    // click), using the element's center as the pointer position.
+    if (event.key === "Enter" && currentTarget && !pressing) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      const rect = currentTarget.getBoundingClientRect();
+      commitElement(currentTarget, {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      });
     }
   };
 
-  // Radix popovers / headless menus / click-outside libs dismiss on
-  // pointerdown / mousedown, not click. Swallow the earlier events too so the
-  // underlying UI doesn't react to picker selections.
-  const swallowPointer = (event: Event) => {
-    if (paused) return;
+  // Swallow events targeting the underlying page so Radix popovers / headless
+  // menus / click-outside libs don't react to picker gestures. Selection logic
+  // lives in onDown/onUp (a press that moves = area; a press that doesn't =
+  // element); plain `click` is swallowed since selection happens on mouseup.
+  const swallow = (event: Event): boolean => {
+    if (paused) return false;
     const el = event.target as Element | null;
-    if (el && el.closest(`[${IGNORE_ATTR}]`)) return;
+    if (el && el.closest(`[${IGNORE_ATTR}]`)) return false;
     event.preventDefault();
     event.stopPropagation();
     (event as MouseEvent).stopImmediatePropagation?.();
+    return true;
   };
 
-  const onClick = (event: MouseEvent) => {
-    if (paused) return;
-    const el = event.target as Element | null;
-    if (el && el.closest(`[${IGNORE_ATTR}]`)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-    const target = currentTarget;
-    if (!target) return;
+  const onDown = (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    if (!swallow(event)) return;
+    startPt = { x: event.clientX, y: event.clientY };
+    pressing = true;
+    isArea = false;
+  };
 
+  // Commit a specific element as a pick. Shared by the click path and the
+  // keyboard (Enter) path.
+  const commitElement = (target: Element | null, pointer: { x: number; y: number }) => {
+    if (!target || target.closest(`[${IGNORE_ATTR}]`)) return;
     const rect = target.getBoundingClientRect();
     pause();
     options.onPick({
@@ -262,13 +354,78 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
         width: Math.round(rect.width),
         height: Math.round(rect.height),
       },
-      pointer: { x: event.clientX, y: event.clientY },
+      pointer,
       element: target,
     });
   };
 
+  // Select the element currently under the cursor (the no-drag / click path).
+  const pickElement = (event: MouseEvent) => {
+    commitElement(currentTarget || document.elementFromPoint(event.clientX, event.clientY), {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  // Capture the dragged rectangle as a screenshot-only entry. The synthetic,
+  // parenthesized selector marks it as non-element so the send path treats the
+  // captured image as the report image rather than outlining a DOM node.
+  const pickArea = async (start: { x: number; y: number }, event: MouseEvent) => {
+    const area = areaRectFrom(start, event);
+    if (area.width < 8 || area.height < 8) {
+      resume();
+      return;
+    }
+    pause();
+    try {
+      const screenshot = await captureArea(area);
+      options.onPick({
+        selector: `(area ${Math.round(area.width)}×${Math.round(area.height)})`,
+        text: "",
+        rect: { x: Math.round(area.x), y: Math.round(area.y), width: Math.round(area.width), height: Math.round(area.height) },
+        pointer: { x: event.clientX, y: event.clientY },
+        element: document.body,
+        screenshot,
+      });
+    } catch {
+      resume();
+    }
+  };
+
+  const onUp = (event: MouseEvent) => {
+    if (!pressing) {
+      swallow(event);
+      return;
+    }
+    const wasArea = isArea;
+    const start = startPt;
+    pressing = false;
+    isArea = false;
+    startPt = null;
+    if (!swallow(event)) return;
+    suppressClick = true;
+    if (wasArea && start) void pickArea(start, event);
+    else pickElement(event);
+  };
+
+  // Click runs after a selecting mouseup — eat it once so it never reaches the
+  // page. Otherwise behave like swallow (protect the underlying UI while active).
+  const onClick = (event: MouseEvent) => {
+    if (suppressClick) {
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      (event as MouseEvent).stopImmediatePropagation?.();
+      return;
+    }
+    swallow(event);
+  };
+
   const pause = () => {
     paused = true;
+    pressing = false;
+    isArea = false;
+    startPt = null;
     highlight.style.display = "none";
     hint.style.display = "none";
   };
@@ -277,27 +434,28 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
     if (!active) return;
     paused = false;
     currentTarget = null;
+    hint.textContent = HINT_DEFAULT;
     hint.style.display = "block";
   };
 
   const stop = () => {
     if (!active) return;
     active = false;
-    document.removeEventListener("mousemove", onMove, true);
+    // Pointer events (not mouse events): canceling pointerdown suppresses the
+    // compatibility mousedown/mouseup, so the gesture must be driven by pointers.
+    document.removeEventListener("pointermove", onMove, true);
+    document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("pointerup", onUp, true);
     document.removeEventListener("click", onClick, true);
-    document.removeEventListener("pointerdown", swallowPointer, true);
-    document.removeEventListener("mousedown", swallowPointer, true);
-    document.removeEventListener("mouseup", swallowPointer, true);
     document.removeEventListener("keydown", onKeyDown, true);
     highlight.remove();
     hint.remove();
   };
 
-  document.addEventListener("mousemove", onMove, true);
+  document.addEventListener("pointermove", onMove, true);
+  document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("pointerup", onUp, true);
   document.addEventListener("click", onClick, true);
-  document.addEventListener("pointerdown", swallowPointer, true);
-  document.addEventListener("mousedown", swallowPointer, true);
-  document.addEventListener("mouseup", swallowPointer, true);
   document.addEventListener("keydown", onKeyDown, true);
 
   return { stop, pause, resume, isActive: () => active };

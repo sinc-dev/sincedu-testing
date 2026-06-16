@@ -317,8 +317,34 @@ reports.get("/access", requireAuth, async (c) => {
   return c.json({ isTester: tester, isAdmin: admin, email: user.email, name: user.name });
 });
 
+// Is this request coming from a localhost dev origin? Used to allow
+// unauthenticated report submissions during local development.
+function isLocalhostOrigin(origin: string | null | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+// Auth gate for report submission. Localhost dev origins may submit without a
+// token (attributed to a synthetic local reporter); every other origin must
+// present a valid tester token.
+const submitAuth = async (c: any, next: any) => {
+  const origin = c.req.header("origin") || c.req.header("referer");
+  if (isLocalhostOrigin(origin)) {
+    c.set("user", { uid: "local", email: "local@localhost", name: "Local Dev", emailVerified: false });
+    return next();
+  }
+  return requireAuth(c, async () => {
+    await requireTester(c, next);
+  });
+};
+
 // POST / — submit a report (multipart: project, meta JSON, optional screenshot)
-reports.post("/", requireAuth, requireTester, async (c) => {
+reports.post("/", submitAuth, async (c) => {
   const user = c.get("user");
   const form = await c.req.formData();
 

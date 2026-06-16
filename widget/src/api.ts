@@ -59,9 +59,13 @@ export async function submitReport(input: SubmitInput): Promise<{ id: string }> 
     }),
   );
 
+  // Local dev passes an empty token — submit without a bearer (the worker
+  // authorizes by localhost origin instead).
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${apiBase}/api/reports`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers,
     body: form,
   });
   if (!res.ok) {
@@ -69,4 +73,61 @@ export async function submitReport(input: SubmitInput): Promise<{ id: string }> 
     throw new Error(`submit failed (${res.status}) ${detail}`.trim());
   }
   return res.json();
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Failed to read screenshot"));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      // Strip the data URL prefix ("data:image/jpeg;base64,") — keep raw base64.
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Local-dev submission: POST the report to a host-provided sink URL (e.g. a Vite
+ * dev-server endpoint) as JSON with inline base64 screenshots, so it can be
+ * written straight to the local codebase. Never touches the worker or R2.
+ */
+export async function submitReportLocal(
+  endpoint: string,
+  input: Omit<SubmitInput, "apiBase" | "token">,
+): Promise<{ id: string }> {
+  const { project, note, severity, screenshots, elements, screenshotError } = input;
+  const shots = await Promise.all(
+    screenshots.map(async (file) => ({
+      type: file.type || "image/jpeg",
+      base64: await fileToBase64(file),
+    })),
+  );
+  const primary = elements[0];
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project,
+      note,
+      severity,
+      pageUrl: window.location.href,
+      userAgent: navigator.userAgent,
+      elementSelector: primary?.selector,
+      elementText: primary?.text,
+      elementRect: primary?.rect,
+      elements,
+      consoleLogs: getConsoleEntries(),
+      networkLogs: getNetworkEntries(),
+      screenshotError: screenshotError || undefined,
+      screenshots: shots,
+      createdAt: new Date().toISOString(),
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`local save failed (${res.status}) ${detail}`.trim());
+  }
+  return res.json().catch(() => ({ id: "local" }));
 }
