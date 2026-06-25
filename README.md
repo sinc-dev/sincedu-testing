@@ -31,6 +31,13 @@ The widget's sign-in popup defaults to `https://testing.sincedu.com/auth`, so no
 | `widget/` | The embeddable `widget.js` — vanilla TS in a Shadow DOM. Picker + screenshot + log capture + Supabase auth. |
 | `app/` | `testing.sincedu.com` review UI (React + Vite). Admins see all reports; testers see their own. |
 
+## MCP access
+
+MCP tokens expose these tools:
+
+- `list_reports`, `get_report`, `get_report_logs` for reports visible to the token owner.
+- `update_report_status`, `bulk_update_report_status` for admin MCP tokens only. Valid statuses are `open`, `investigating`, `in_progress`, `fixed`, `resolved`, and `closed`.
+
 ## Identity
 
 Tester identity comes from Supabase Auth (SINC Daily Reports project, Google provider).

@@ -7,7 +7,9 @@ import { requireAuth, requireTester } from "../middleware.js";
 const MAX_TOKEN_NAME_LENGTH = 80;
 const MAX_REPORT_LIMIT = 50;
 const DEFAULT_REPORT_LIMIT = 20;
+const MCP_SERVER_VERSION = "0.2.0";
 const TOKEN_PREFIX = "sinc_mcp_";
+const ALLOWED_STATUSES = new Set(["open", "investigating", "in_progress", "fixed", "resolved", "closed"]);
 
 type JsonRpcRequest = {
   jsonrpc?: string;
@@ -95,6 +97,30 @@ function numericLimit(value: unknown): number {
   return Math.min(Math.max(Math.trunc(raw), 1), MAX_REPORT_LIMIT);
 }
 
+function normalizeStatus(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const lower = value.trim().toLowerCase();
+  return ALLOWED_STATUSES.has(lower) ? lower : null;
+}
+
+function normalizeReportIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    .map((id) => id.trim())
+    .slice(0, MAX_REPORT_LIMIT))];
+}
+
+function sanitizeResolution(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[<>]/g, "")
+    .trim()
+    .slice(0, 4000);
+  return cleaned || null;
+}
+
 async function listReportsForActor(c: any, actor: { email: string; isAdmin: boolean }, args: Record<string, unknown>) {
   const filters = ["deleted_at IS NULL"];
   const binds: unknown[] = [];
@@ -139,6 +165,87 @@ async function getAccessibleReport(c: any, actor: { email: string; isAdmin: bool
   if (!report) return null;
   if (!actor.isAdmin && normalizeEmail(report.reporter_email) !== actor.email) return null;
   return report;
+}
+
+async function getReportSummary(c: any, id: string) {
+  return await c.env.DB.prepare(
+    `SELECT id, project, title, status, resolution, updated_at
+     FROM reports
+     WHERE id = ? AND deleted_at IS NULL
+     LIMIT 1`,
+  )
+    .bind(id)
+    .first();
+}
+
+async function updateReportStatusForActor(
+  c: any,
+  actor: { email: string; isAdmin: boolean },
+  args: Record<string, unknown>,
+) {
+  if (!actor.isAdmin) {
+    throw new Error("Only admin MCP tokens can update report status");
+  }
+  if (typeof args.id !== "string" || !args.id.trim()) {
+    throw new Error("id is required");
+  }
+  const status = normalizeStatus(args.status);
+  if (!status) {
+    throw new Error(`status must be one of: ${[...ALLOWED_STATUSES].join(", ")}`);
+  }
+
+  const updates = ["status = ?"];
+  const binds: unknown[] = [status];
+  if ("resolution" in args) {
+    updates.push("resolution = ?");
+    binds.push(sanitizeResolution(args.resolution));
+  }
+  binds.push(args.id.trim());
+
+  const result = await c.env.DB.prepare(
+    `UPDATE reports
+     SET ${updates.join(", ")}, updated_at = datetime('now')
+     WHERE id = ? AND deleted_at IS NULL`,
+  )
+    .bind(...binds)
+    .run();
+
+  if (!result.meta || result.meta.changes === 0) {
+    throw new Error("Report not found");
+  }
+  return await getReportSummary(c, args.id.trim());
+}
+
+async function bulkUpdateReportStatusForActor(
+  c: any,
+  actor: { email: string; isAdmin: boolean },
+  args: Record<string, unknown>,
+) {
+  if (!actor.isAdmin) {
+    throw new Error("Only admin MCP tokens can update report status");
+  }
+  const ids = normalizeReportIds(args.ids);
+  if (ids.length === 0) throw new Error("ids must be a non-empty array of report ids");
+  const status = normalizeStatus(args.status);
+  if (!status) {
+    throw new Error(`status must be one of: ${[...ALLOWED_STATUSES].join(", ")}`);
+  }
+
+  const placeholders = ids.map(() => "?").join(",");
+  const result = await c.env.DB.prepare(
+    `UPDATE reports
+     SET status = ?, updated_at = datetime('now')
+     WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+  )
+    .bind(status, ...ids)
+    .run();
+
+  return {
+    requested: ids.length,
+    updated: result.meta?.changes ?? 0,
+    status,
+    ids,
+  };
 }
 
 async function readReportLogs(c: any, report: Record<string, unknown>, type: unknown) {
@@ -190,6 +297,46 @@ const tools = [
         type: { type: "string", enum: ["console", "network"] },
       },
       required: ["id", "type"],
+    },
+  },
+  {
+    name: "update_report_status",
+    description: "Update one testing bug report status. Requires an admin MCP token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Report id." },
+        status: {
+          type: "string",
+          enum: [...ALLOWED_STATUSES],
+          description: "New report status.",
+        },
+        resolution: {
+          type: "string",
+          description: "Optional short note describing what fixed or changed.",
+        },
+      },
+      required: ["id", "status"],
+    },
+  },
+  {
+    name: "bulk_update_report_status",
+    description: "Update the status of up to 50 testing bug reports. Requires an admin MCP token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Report ids to update, up to 50.",
+        },
+        status: {
+          type: "string",
+          enum: [...ALLOWED_STATUSES],
+          description: "New report status.",
+        },
+      },
+      required: ["ids", "status"],
     },
   },
 ];
@@ -265,7 +412,7 @@ mcp.post("/", async (c) => {
     return c.json(rpcResult(request.id, {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "SINC EDU Testing MCP", version: "0.1.0" },
+      serverInfo: { name: "SINC EDU Testing MCP", version: MCP_SERVER_VERSION },
     }));
   }
 
@@ -296,6 +443,18 @@ mcp.post("/", async (c) => {
         const logs = await readReportLogs(c, report, args.type);
         return c.json(rpcResult(request.id, {
           content: [{ type: "text", text: JSON.stringify({ logs }, null, 2) }],
+        }));
+      }
+      if (name === "update_report_status") {
+        const report = await updateReportStatusForActor(c, actor, args);
+        return c.json(rpcResult(request.id, {
+          content: [{ type: "text", text: JSON.stringify({ report }, null, 2) }],
+        }));
+      }
+      if (name === "bulk_update_report_status") {
+        const result = await bulkUpdateReportStatusForActor(c, actor, args);
+        return c.json(rpcResult(request.id, {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         }));
       }
       return c.json(rpcError(request.id, -32601, "Unknown tool"), 404);

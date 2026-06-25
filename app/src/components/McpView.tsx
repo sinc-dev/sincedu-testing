@@ -98,7 +98,7 @@ export function McpView({ getToken }: Props) {
           <h2>Connect your AI agent to testing reports</h2>
           <p className="muted">
             Generate a scoped token for Claude, Cursor, Codex, or another MCP-capable agent.
-            Tokens can list reports, fetch one report, and pull console or network logs.
+            Tokens can list reports, fetch one report, pull console or network logs, and let admin agents update report status.
           </p>
         </div>
         <div className="endpoint-box">

@@ -14,10 +14,12 @@ const STYLES = `
     display: inline-flex; align-items: center; justify-content: center;
     width: 44px; height: 44px; border-radius: 9999px; border: none; cursor: pointer;
     background: #2e7d46; color: #fff; box-shadow: 0 6px 16px rgba(0,0,0,.25);
+    touch-action: none;
   }
   .launcher:hover { background: #256b3b; }
   .launcher.active { background: #1b5e2c; box-shadow: 0 0 0 3px rgba(46,125,70,.35); }
   .launcher svg { width: 22px; height: 22px; }
+  .corner.dragging .launcher { cursor: grabbing; }
   .badge-count {
     position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px;
     display: flex; align-items: center; justify-content: center; border-radius: 9999px;
@@ -35,6 +37,8 @@ const STYLES = `
     position: fixed; z-index: ${Z + 2}; width: 320px; background: #fff; color: #111827;
     border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.28); padding: 12px;
   }
+  .card-titlebar { cursor: grab; user-select: none; touch-action: none; margin: -4px -4px 0; padding: 4px; border-radius: 8px; }
+  .card.dragging .card-titlebar { cursor: grabbing; }
   .row { display: flex; align-items: center; gap: 8px; }
   .between { justify-content: space-between; }
   .targets-label { font: 600 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .04em; color: #2e7d46; }
@@ -133,6 +137,98 @@ function clamp(pointer: { x: number; y: number }, w: number, h: number) {
   return { left, top };
 }
 
+function clampFixedPosition(el: HTMLElement, left: number, top: number) {
+  const m = 8;
+  const rect = el.getBoundingClientRect();
+  const width = rect.width || el.offsetWidth || 44;
+  const height = rect.height || el.offsetHeight || 44;
+  return {
+    left: Math.max(m, Math.min(left, innerWidth - width - m)),
+    top: Math.max(m, Math.min(top, innerHeight - height - m)),
+  };
+}
+
+function makeFixedDraggable(
+  el: HTMLElement,
+  handle: HTMLElement,
+  options: { allowInteractiveStart?: boolean; onDragStart?: () => void } = {},
+) {
+  const DRAG_THRESHOLD = 4;
+  let pointerId: number | null = null;
+  let startPointer = { x: 0, y: 0 };
+  let startPos = { left: 0, top: 0 };
+  let dragging = false;
+  let suppressClick = false;
+
+  const moveTo = (left: number, top: number) => {
+    const next = clampFixedPosition(el, left, top);
+    el.style.left = `${next.left}px`;
+    el.style.top = `${next.top}px`;
+  };
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const target = event.target as Element | null;
+    if (!options.allowInteractiveStart && target?.closest("button, textarea, select, input, a")) return;
+    const rect = el.getBoundingClientRect();
+    pointerId = event.pointerId;
+    startPointer = { x: event.clientX, y: event.clientY };
+    startPos = { left: rect.left, top: rect.top };
+    dragging = false;
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      /* noop */
+    }
+  });
+
+  handle.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId) return;
+    const dx = event.clientX - startPointer.x;
+    const dy = event.clientY - startPointer.y;
+    if (!dragging && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    if (!dragging) {
+      dragging = true;
+      suppressClick = true;
+      options.onDragStart?.();
+      el.classList.add("dragging");
+    }
+    event.preventDefault();
+    moveTo(startPos.left + dx, startPos.top + dy);
+  });
+
+  const finish = (event: PointerEvent) => {
+    if (pointerId !== event.pointerId) return;
+    pointerId = null;
+    if (dragging) {
+      event.preventDefault();
+      el.classList.remove("dragging");
+    }
+    dragging = false;
+    try {
+      handle.releasePointerCapture(event.pointerId);
+    } catch {
+      /* noop */
+    }
+  };
+
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", finish);
+  handle.addEventListener(
+    "click",
+    (event) => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+    },
+    true,
+  );
+
+  return { moveTo };
+}
+
 export class WidgetUI {
   private root: ShadowRoot;
   private launcherButton: HTMLButtonElement | null = null;
@@ -143,6 +239,17 @@ export class WidgetUI {
     host.id = "sincedu-tester-widget";
     host.setAttribute(IGNORE_ATTR, "true");
     document.body.appendChild(host);
+
+    // The widget host lives on document.body, outside any host-app overlay. shadcn
+    // Drawer/Dialog/Popover (Radix + vaul) listen for document-level pointerdown to
+    // detect "click outside" and dismiss. Interacting with the widget would bubble
+    // up to those listeners and close an open drawer. Stop the dismissal-triggering
+    // events at the host (bubble phase) — the shadow tree has already handled them,
+    // so the widget keeps working while the page's outside-click logic never fires.
+    for (const type of ["pointerdown", "mousedown", "touchstart", "click", "focusin"]) {
+      host.addEventListener(type, (event) => event.stopPropagation());
+    }
+
     this.root = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = STYLES;
@@ -158,6 +265,12 @@ export class WidgetUI {
     const wrap = document.createElement("span");
     wrap.setAttribute(IGNORE_ATTR, "true");
     wrap.className = "launcher-wrap";
+    // When mounted into a host-app element (opts.mount) the launcher lives in the
+    // light DOM, so the shadow-host guard doesn't cover it. Stop dismissal events
+    // here too so clicking the launcher never closes a surrounding shadcn drawer.
+    for (const type of ["pointerdown", "mousedown", "touchstart", "click", "focusin"]) {
+      wrap.addEventListener(type, (event) => event.stopPropagation());
+    }
 
     const button = document.createElement("button");
     button.setAttribute(IGNORE_ATTR, "true");
@@ -183,6 +296,14 @@ export class WidgetUI {
       corner.className = `corner ${opts.position}`;
       corner.appendChild(wrap);
       this.root.appendChild(corner);
+      makeFixedDraggable(corner, button, {
+        allowInteractiveStart: true,
+        onDragStart: () => {
+          corner.classList.remove("bottom-right", "bottom-left", "top-right", "top-left");
+          corner.style.right = "auto";
+          corner.style.bottom = "auto";
+        },
+      });
     }
   }
 
@@ -260,7 +381,7 @@ export class WidgetUI {
     place(opts.pointer);
 
     card.innerHTML = `
-      <div class="row between">
+      <div class="row between card-titlebar">
         <span class="targets-label">targets (0)</span>
         <button class="iconbtn" data-act="close" aria-label="Cancel">×</button>
       </div>
@@ -283,6 +404,8 @@ export class WidgetUI {
     const micBtn = card.querySelector('[data-act="mic"]') as HTMLButtonElement;
     const cameraBtn = card.querySelector('[data-act="camera"]') as HTMLButtonElement;
     const errEl = card.querySelector(".err") as HTMLDivElement;
+    const titlebar = card.querySelector(".card-titlebar") as HTMLDivElement;
+    makeFixedDraggable(card, titlebar);
     textarea.focus();
 
     // ---- Speech-to-text dictation (Chrome/Edge/Safari) ----
