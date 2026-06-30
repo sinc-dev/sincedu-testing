@@ -91,6 +91,39 @@ const CAMERA_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 
 const SEVERITIES = ["low", "medium", "high", "critical"];
 
+function installWidgetEventBoundary(el: HTMLElement): void {
+  // The widget may be used while the host app has a modal Drawer/Dialog open.
+  // Radix/vaul-style focus scopes and outside-click handlers listen at the
+  // document level, so widget interactions must not bubble out as dismiss or
+  // focus-leaving signals for the host app.
+  for (const type of ["pointerdown", "mousedown", "touchstart", "click", "focusin", "focusout"]) {
+    el.addEventListener(type, (event) => event.stopPropagation());
+  }
+
+  // Focus events from inside a shadow root are retargeted to the shadow host.
+  // A document-level Radix FocusScope can see that retargeted focus before the
+  // host's own listener runs and immediately pull focus back into its drawer.
+  // Stop widget focus events at window capture, while leaving pointer/click
+  // events alone so widget controls still receive normal clicks.
+  for (const type of ["focusin", "focusout"]) {
+    window.addEventListener(
+      type,
+      (event) => {
+        if (event.composedPath().includes(el)) event.stopPropagation();
+      },
+      true,
+    );
+  }
+}
+
+function attachWidgetShadow(host: HTMLElement): ShadowRoot {
+  const root = host.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = STYLES;
+  root.appendChild(style);
+  return root;
+}
+
 // Mirror of the host-app sanitizer: strip control chars and angle brackets,
 // cap at the same 2000-char limit the textarea enforces.
 function sanitizePlainText(value: string): string {
@@ -240,20 +273,8 @@ export class WidgetUI {
     host.setAttribute(IGNORE_ATTR, "true");
     document.body.appendChild(host);
 
-    // The widget host lives on document.body, outside any host-app overlay. shadcn
-    // Drawer/Dialog/Popover (Radix + vaul) listen for document-level pointerdown to
-    // detect "click outside" and dismiss. Interacting with the widget would bubble
-    // up to those listeners and close an open drawer. Stop the dismissal-triggering
-    // events at the host (bubble phase) — the shadow tree has already handled them,
-    // so the widget keeps working while the page's outside-click logic never fires.
-    for (const type of ["pointerdown", "mousedown", "touchstart", "click", "focusin"]) {
-      host.addEventListener(type, (event) => event.stopPropagation());
-    }
-
-    this.root = host.attachShadow({ mode: "open" });
-    const style = document.createElement("style");
-    style.textContent = STYLES;
-    this.root.appendChild(style);
+    installWidgetEventBoundary(host);
+    this.root = attachWidgetShadow(host);
   }
 
   mountLauncher(opts: {
@@ -265,12 +286,7 @@ export class WidgetUI {
     const wrap = document.createElement("span");
     wrap.setAttribute(IGNORE_ATTR, "true");
     wrap.className = "launcher-wrap";
-    // When mounted into a host-app element (opts.mount) the launcher lives in the
-    // light DOM, so the shadow-host guard doesn't cover it. Stop dismissal events
-    // here too so clicking the launcher never closes a surrounding shadcn drawer.
-    for (const type of ["pointerdown", "mousedown", "touchstart", "click", "focusin"]) {
-      wrap.addEventListener(type, (event) => event.stopPropagation());
-    }
+    installWidgetEventBoundary(wrap);
 
     const button = document.createElement("button");
     button.setAttribute(IGNORE_ATTR, "true");
@@ -289,7 +305,15 @@ export class WidgetUI {
 
     const hostEl = opts.mount ? document.querySelector(opts.mount) : null;
     if (hostEl) {
-      hostEl.appendChild(wrap);
+      const mountHost = document.createElement("span");
+      mountHost.id = "sincedu-tester-widget-mounted";
+      mountHost.setAttribute(IGNORE_ATTR, "true");
+      mountHost.style.display = "inline-flex";
+      mountHost.style.verticalAlign = "middle";
+      installWidgetEventBoundary(mountHost);
+      hostEl.appendChild(mountHost);
+      this.root = attachWidgetShadow(mountHost);
+      this.root.appendChild(wrap);
     } else {
       const corner = document.createElement("div");
       corner.setAttribute(IGNORE_ATTR, "true");
@@ -406,7 +430,31 @@ export class WidgetUI {
     const errEl = card.querySelector(".err") as HTMLDivElement;
     const titlebar = card.querySelector(".card-titlebar") as HTMLDivElement;
     makeFixedDraggable(card, titlebar);
-    textarea.focus();
+
+    let keepTextFocus = true;
+    let focusRestoreTimer: number | null = null;
+    const hasWidgetFocus = () => {
+      const activeInWidget = this.root.activeElement;
+      return activeInWidget instanceof Element && card.contains(activeInWidget);
+    };
+    const restoreTextFocus = () => {
+      if (!keepTextFocus || !card.isConnected || hasWidgetFocus()) return;
+      textarea.focus({ preventScroll: true });
+    };
+    const scheduleTextFocusRestore = () => {
+      if (!keepTextFocus || focusRestoreTimer !== null) return;
+      queueMicrotask(restoreTextFocus);
+      requestAnimationFrame(restoreTextFocus);
+      focusRestoreTimer = window.setTimeout(() => {
+        focusRestoreTimer = null;
+        restoreTextFocus();
+      }, 0);
+    };
+    const onDocumentFocusChange = () => scheduleTextFocusRestore();
+    document.addEventListener("focusin", onDocumentFocusChange, true);
+    document.addEventListener("focusout", onDocumentFocusChange, true);
+    textarea.focus({ preventScroll: true });
+    scheduleTextFocusRestore();
 
     // ---- Speech-to-text dictation (Chrome/Edge/Safari) ----
     const SpeechRecognitionCtor =
@@ -543,6 +591,13 @@ export class WidgetUI {
     };
 
     const close = () => {
+      keepTextFocus = false;
+      if (focusRestoreTimer !== null) {
+        window.clearTimeout(focusRestoreTimer);
+        focusRestoreTimer = null;
+      }
+      document.removeEventListener("focusin", onDocumentFocusChange, true);
+      document.removeEventListener("focusout", onDocumentFocusChange, true);
       stopDictation();
       card.remove();
     };
