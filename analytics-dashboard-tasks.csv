@@ -1,0 +1,5 @@
+ID,Feature_Name,Category,Status,Description,Dependencies,Implementation_Notes
+A1,Analytics Dashboard,Backend,Done,Add an authenticated analytics endpoint that summarizes accessible reports by project/status/severity/reporter/domain/trend,None,Worker route should reuse report access rules
+A2,Analytics Dashboard,Frontend API,Done,Add typed analytics API client models and fetch helper,A1,Keep API layer consistent with existing authFetch/json pattern
+A3,Analytics Dashboard,Frontend UI,Done,Add dashboard navigation and project-by-project analytics view,A2,Use existing portal shell/card/filter styling patterns
+A4,Analytics Dashboard,Verification,Done,Run coordinated typecheck/build verification,A1 A2 A3,Use project typecheck coordination wrapper or ai-typecheck-coordinated

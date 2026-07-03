@@ -1,0 +1,7 @@
+ID,Feature_Name,Category,Status,Description,Dependencies,Implementation_Notes
+S1,Project Shadcn Conversion,UI Primitives,Done,Add missing shadcn-style primitives needed across the React app,None,Input textarea label select table alert sheet-compatible drawer helpers
+S2,Project Shadcn Conversion,App Shell,Done,Convert sign-in topbar navigation and access states to shadcn primitives,S1,Keep current routing/state behavior
+S3,Project Shadcn Conversion,Reports,Done,Convert reports table filters bulk actions pagination and detail drawer to shadcn primitives,S1 S2,Preserve report loading thumbnails and edit behavior
+S4,Project Shadcn Conversion,MCP Allowlist,Done,Convert MCP token and allowlist screens to shadcn primitives,S1 S2,Preserve forms tables drawers and copy behavior
+S5,Project Shadcn Conversion,Styles Cleanup,Done,Remove redundant custom component CSS while keeping layout/media/chart styles,S2 S3 S4,Do not break existing widget/shadow DOM CSS
+S6,Project Shadcn Conversion,Verification,Done,Run coordinated TypeScript check and production build,S1 S2 S3 S4 S5,Use ai-typecheck-coordinated wrapper

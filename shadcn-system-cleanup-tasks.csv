@@ -1,0 +1,7 @@
+ID,Feature_Name,Category,Status,Description,Dependencies,Implementation_Notes
+SC-001,Shadcn system cleanup,Audit,Done,Audit remaining custom component-shaped UI and compare with SINC Daily Reports patterns,,Found custom pagination filters menus drawers shell and skeletons in app UI
+SC-002,Shadcn system cleanup,Dependencies,Done,Install missing shadcn primitives with shadcn MCP command,SC-001,"sheet dropdown-menu avatar skeleton separator tabs"
+SC-003,Shadcn system cleanup,App shell,Done,Replace custom user menu and mobile drawer shell pieces with shadcn primitives,SC-002,"Use DropdownMenu Avatar Sheet where practical"
+SC-004,Shadcn system cleanup,Reports UI,Done,Move filters bulk actions and skeletons away from legacy index.css and toward shadcn composition,SC-002,"Use shadcn Select Checkbox Skeleton Pagination Button Table"
+SC-005,Shadcn system cleanup,Drawers,Done,Replace custom overlay/drawer report and tester details with shadcn Sheet,SC-002,"Remove custom overlay/drawer dependency for app detail panels"
+SC-006,Shadcn system cleanup,Verification,Done,Run coordinated typecheck build and browser smoke checks,SC-003;SC-004;SC-005,"Use project coordinated typecheck command"

@@ -15,3 +15,7 @@ secrets/
 *.tsbuildinfo
 .DS_Store
 coverage/
+
+# Local scratch / tooling artifacts
+.playwright-mcp/
+tmp/

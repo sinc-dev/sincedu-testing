@@ -1,0 +1,5 @@
+ID,Feature_Name,Category,Status,Description,Dependencies,Implementation_Notes
+T1,Testing Widget Report Controls,Widget API,Done,Add a widget-side reports list API helper for the current tester,,Use existing /api/reports endpoint and bearer auth
+T2,Testing Widget Report Controls,Launcher UI,Done,Replace side buttons with a two-circle launcher whose outer circle expands an orbit menu,,Keep controls in Shadow DOM and preserve existing launcher behavior
+T3,Testing Widget Report Controls,Page Highlights,Done,Fetch the current tester's submitted reports and highlight matching elements on the current page,T1 T2,Filter by current URL and reporter email where available
+T4,Testing Widget Report Controls,Verification,Done,Build and type-check the widget with coordinated TypeScript,T1 T2 T3,Use ai-typecheck-coordinated because no project wrapper exists
