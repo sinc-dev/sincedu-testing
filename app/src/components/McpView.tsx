@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createMcpToken, getMcpEndpoint, listMcpTokens, revokeMcpToken, type McpTokenRow } from "../api";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { Button } from "./ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 interface Props {
   getToken: () => Promise<string | null>;
+}
+
+interface PendingCopy {
+  value: string;
+  label: string;
 }
 
 function formatDate(value: string | null): string {
@@ -19,6 +30,8 @@ export function McpView({ getToken }: Props) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState("");
   const [error, setError] = useState("");
+  const [clipboardExplained, setClipboardExplained] = useState(false);
+  const [pendingCopy, setPendingCopy] = useState<PendingCopy | null>(null);
   const endpoint = useMemo(() => getMcpEndpoint(), []);
 
   const load = useCallback(async () => {
@@ -39,7 +52,7 @@ export function McpView({ getToken }: Props) {
     void load();
   }, [load]);
 
-  const copy = async (value: string, label: string) => {
+  const writeClipboard = async (value: string, label: string) => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(label);
@@ -47,6 +60,22 @@ export function McpView({ getToken }: Props) {
     } catch {
       setCopied("");
     }
+  };
+
+  const copy = async (value: string, label: string) => {
+    if (!clipboardExplained) {
+      setPendingCopy({ value, label });
+      return;
+    }
+    await writeClipboard(value, label);
+  };
+
+  const continueCopy = async () => {
+    if (!pendingCopy) return;
+    const next = pendingCopy;
+    setClipboardExplained(true);
+    setPendingCopy(null);
+    await writeClipboard(next.value, next.label);
   };
 
   const create = async (event: React.FormEvent) => {
@@ -91,90 +120,124 @@ export function McpView({ getToken }: Props) {
   }, null, 2);
 
   return (
-    <div className="mcp-page">
-      <section className="card mcp-hero">
-        <div className="mcp-hero-copy">
-          <p className="eyebrow">MCP access</p>
-          <h2>Connect your AI agent to testing reports</h2>
-          <p className="muted">
+    <div className="grid gap-4">
+      <Card>
+        <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] lg:items-center">
+          <div className="min-w-0">
+          <p className="m-0 mb-1.5 text-[11px] font-bold uppercase tracking-[0.08em] text-primary">MCP access</p>
+          <h2 className="m-0 text-3xl font-bold leading-tight">Connect your AI agent to testing reports</h2>
+          <CardDescription>
             Generate a scoped token for Claude, Cursor, Codex, or another MCP-capable agent.
             Tokens can list reports, fetch one report, pull console or network logs, and let admin agents update report status.
-          </p>
+          </CardDescription>
         </div>
-        <div className="endpoint-box">
+        <div className="grid gap-2 rounded-lg border bg-muted/35 p-4">
           <span>Endpoint</span>
-          <code>{endpoint}</code>
-          <button className="btn ghost" type="button" onClick={() => void copy(endpoint, "endpoint")}>
+          <code className="break-all rounded-md bg-background px-2 py-1 font-mono text-xs">{endpoint}</code>
+          <Button variant="outline" type="button" onClick={() => void copy(endpoint, "endpoint")}>
             {copied === "endpoint" ? "Copied" : "Copy"}
-          </button>
+          </Button>
         </div>
-      </section>
+        </CardContent>
+      </Card>
 
-      {error ? <div className="error-banner"><div><strong>MCP setup error</strong><p>{error}</p></div></div> : null}
-
-      {secret ? (
-        <section className="card secret-card">
-          <div>
-            <h3>Copy this token now</h3>
-            <p className="muted">It is only shown once. Revoke it and create a new one if it is lost.</p>
-          </div>
-          <code className="secret-token">{secret}</code>
-          <button className="btn" type="button" onClick={() => void copy(secret, "secret")}>
-            {copied === "secret" ? "Copied" : "Copy token"}
-          </button>
-        </section>
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTitle>MCP setup error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       ) : null}
 
-      <section className="mcp-grid">
-        <div className="card mcp-form-card">
-          <h3 style={{ marginTop: 0 }}>Create token</h3>
-          <form className="mcp-token-form" onSubmit={create}>
-            <label className="field">
-              <span>Token name</span>
-              <input className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="Claude desktop" />
-            </label>
-            <button className="btn" disabled={busy}>{busy ? "Creating..." : "Generate token"}</button>
-          </form>
-        </div>
+      {pendingCopy ? (
+        <Alert>
+          <AlertTitle>Clipboard access</AlertTitle>
+          <AlertDescription className="grid gap-3">
+            <span>
+              The next step copies the selected MCP value to your clipboard. Your browser or OS may ask for permission before allowing the copy.
+            </span>
+            <span className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" onClick={() => void continueCopy()}>Continue copy</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => setPendingCopy(null)}>Cancel</Button>
+            </span>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-        <div className="card mcp-config-card">
-          <h3 style={{ marginTop: 0 }}>Agent config</h3>
-          <pre className="code-block">{sampleConfig}</pre>
-          <button className="btn ghost" type="button" onClick={() => void copy(sampleConfig, "config")}>
-            {copied === "config" ? "Copied" : "Copy config"}
-          </button>
-        </div>
-      </section>
-
-      <section className="card">
-        <h3 style={{ marginTop: 0 }}>Active tokens</h3>
-        {loading ? (
-          <p className="muted">Loading...</p>
-        ) : tokens.length === 0 ? (
-          <p className="muted">No MCP tokens yet.</p>
-        ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr><th>Name</th><th>Token</th><th>Created</th><th>Last used</th><th></th></tr>
-              </thead>
-              <tbody>
-                {tokens.map((token) => (
-                  <tr key={token.id}>
-                    <td>{token.name}</td>
-                    <td className="mono">...{token.last_four}</td>
-                    <td className="muted">{formatDate(token.created_at)}</td>
-                    <td className="muted">{formatDate(token.last_used_at)}</td>
-                    <td style={{ textAlign: "right" }}>
-                      <button className="btn danger" type="button" onClick={() => void revoke(token.id)}>Revoke</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {secret ? (
+        <Card>
+          <CardContent className="grid gap-3 p-4">
+            <div>
+            <CardTitle>Copy this token now</CardTitle>
+            <CardDescription>It is only shown once. Revoke it and create a new one if it is lost.</CardDescription>
           </div>
-        )}
+          <code className="break-all rounded-md border bg-muted px-3 py-2 font-mono text-xs">{secret}</code>
+          <Button type="button" onClick={() => void copy(secret, "secret")}>
+            {copied === "secret" ? "Copied" : "Copy token"}
+          </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Create token</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3" onSubmit={create}>
+              <div className="grid gap-1.5">
+                <Label htmlFor="mcp-token-name">Token name</Label>
+                <Input id="mcp-token-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Claude desktop" />
+              </div>
+              <Button disabled={busy}>{busy ? "Creating..." : "Generate token"}</Button>
+            </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Agent config</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <pre className="my-2 mb-2.5 max-w-full overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-md border bg-muted/40 p-2.5 font-mono text-[11px] leading-normal text-foreground min-[821px]:text-xs">{sampleConfig}</pre>
+            <Button variant="outline" type="button" onClick={() => void copy(sampleConfig, "config")}>
+              {copied === "config" ? "Copied" : "Copy config"}
+            </Button>
+          </CardContent>
+        </Card>
       </section>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Active tokens</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <p className="text-[13px] text-muted-foreground">Loading...</p>
+          ) : tokens.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground">No MCP tokens yet.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow><TableHead>Name</TableHead><TableHead>Token</TableHead><TableHead>Created</TableHead><TableHead>Last used</TableHead><TableHead></TableHead></TableRow>
+              </TableHeader>
+              <TableBody>
+                {tokens.map((token) => (
+                  <TableRow key={token.id}>
+                    <TableCell>{token.name}</TableCell>
+                    <TableCell className="font-mono text-xs">...{token.last_four}</TableCell>
+                    <TableCell className="text-[13px] text-muted-foreground">{formatDate(token.created_at)}</TableCell>
+                    <TableCell className="text-[13px] text-muted-foreground">{formatDate(token.last_used_at)}</TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="destructive" type="button" onClick={() => void revoke(token.id)}>Revoke</Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS reports (
   console_count INTEGER NOT NULL DEFAULT 0,
   network_count INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
+  updated_by_email TEXT,
+  updated_by_source TEXT,
+  fixed_at TEXT,
+  fixed_by_email TEXT,
+  fix_commit_sha TEXT,
+  fix_commit_url TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -40,6 +46,20 @@ CREATE INDEX IF NOT EXISTS reports_reporter_idx ON reports (reporter_email);
 CREATE INDEX IF NOT EXISTS reports_status_idx ON reports (status);
 CREATE INDEX IF NOT EXISTS reports_deleted_idx ON reports (deleted_at);
 CREATE INDEX IF NOT EXISTS reports_created_idx ON reports (created_at);
+
+CREATE TABLE IF NOT EXISTS report_audit_events (
+  id TEXT PRIMARY KEY,
+  report_id TEXT NOT NULL,
+  actor_email TEXT NOT NULL,
+  actor_source TEXT NOT NULL,
+  action TEXT NOT NULL,
+  before_json TEXT,
+  after_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (report_id) REFERENCES reports(id)
+);
+CREATE INDEX IF NOT EXISTS report_audit_events_report_idx ON report_audit_events (report_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS report_audit_events_actor_idx ON report_audit_events (actor_email);
 
 CREATE TABLE IF NOT EXISTS mcp_tokens (
   id TEXT PRIMARY KEY,

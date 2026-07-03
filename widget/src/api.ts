@@ -15,6 +15,26 @@ export async function fetchAccess(apiBase: string, token: string): Promise<Acces
   return res.json();
 }
 
+export interface ReportSummary {
+  id: string;
+  project: string | null;
+  reporter_email: string | null;
+  title: string;
+  status: string;
+  page_url: string | null;
+  element_selector: string | null;
+  created_at: string;
+}
+
+export async function listReports(apiBase: string, token: string): Promise<ReportSummary[]> {
+  const res = await fetch(`${apiBase}/api/reports`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`reports load failed (${res.status})`);
+  const data = await res.json() as { reports?: ReportSummary[] };
+  return Array.isArray(data.reports) ? data.reports : [];
+}
+
 export interface ReportElement {
   selector: string;
   text: string;

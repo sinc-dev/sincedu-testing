@@ -42,7 +42,7 @@ export function HeroPicker({ className }: { className?: string }) {
 
 function StepFrame({ children }: { children: React.ReactNode }) {
   return (
-    <span className="step-icon" aria-hidden>
+    <span className="inline-flex h-[26px] w-[26px] items-center justify-center rounded-[7px] bg-accent text-accent-foreground" aria-hidden>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         {children}
       </svg>

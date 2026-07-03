@@ -36,6 +36,7 @@ The widget's sign-in popup defaults to `https://testing.sincedu.com/auth`, so no
 MCP tokens expose these tools:
 
 - `list_reports`, `get_report`, `get_report_logs` for reports visible to the token owner.
+- `get_report_audit_log` for recent report update history visible to the token owner.
 - `update_report_status`, `bulk_update_report_status` for admin MCP tokens only. Valid statuses are `open`, `investigating`, `in_progress`, `fixed`, `resolved`, and `closed`.
 
 ## Identity

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { completeOAuthRedirect, getAuthRedirectUrl, hasSupabaseConfig, supabase } from "./supabase";
+import { Button } from "./components/ui/button";
 
 const MESSAGE_TYPE = "sincedu-tester-auth";
 
@@ -71,12 +72,11 @@ export function AuthPopup() {
   }, []);
 
   return (
-    <div className="center">
+    <div className="flex min-h-[70vh] flex-col items-center justify-center gap-4 px-5 py-8 text-center">
       <h2>SINC EDU · Testing</h2>
-      <p className="muted">{message}</p>
+      <p className="text-[13px] text-muted-foreground">{message}</p>
       {phase === "signin" ? (
-        <button
-          className="btn"
+        <Button
           onClick={() => {
             const target = new URLSearchParams(window.location.search).get("o") || "";
             void supabase.auth.signInWithOAuth({
@@ -89,7 +89,7 @@ export function AuthPopup() {
           }}
         >
           Sign in with Google
-        </button>
+        </Button>
       ) : null}
     </div>
   );

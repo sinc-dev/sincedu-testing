@@ -8,6 +8,10 @@ interface SupabaseUserResponse {
 }
 
 export async function verifySupabaseToken(token: string, supabaseUrl: string, supabaseAnonKey: string): Promise<AuthUser> {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Missing Supabase worker config");
+  }
+
   const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/auth/v1/user`, {
     headers: {
       apikey: supabaseAnonKey,
@@ -30,7 +34,7 @@ export async function verifySupabaseToken(token: string, supabaseUrl: string, su
 }
 
 export function isAdminEmail(email: string, adminEmails: string): boolean {
-  const list = adminEmails
+  const list = (adminEmails || "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);

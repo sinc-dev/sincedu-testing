@@ -49,12 +49,115 @@ function normalizeStatus(value: unknown): string | null {
   return ALLOWED_STATUSES.has(lower) ? lower : null;
 }
 
+function normalizeCommitSha(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[0-9a-f]{7,40}$/i.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function normalizeCommitUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = sanitizePlainText(value, 500);
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value
     .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
     .map((id) => id.trim())
     .slice(0, 200))];
+}
+
+type ActorSource = "dashboard" | "mcp";
+
+interface MutationActor {
+  email: string;
+  source: ActorSource;
+}
+
+type ReportAuditSnapshot = Record<string, unknown>;
+
+function dashboardActor(email: string): MutationActor {
+  const normalized = normalizeEmail(email);
+  if (!normalized) throw new ReportError(403, "Updater email is required");
+  return { email: normalized, source: "dashboard" };
+}
+
+function auditSnapshot(row: Record<string, unknown> | null): ReportAuditSnapshot | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    note: row.note,
+    severity: row.severity,
+    status: row.status,
+    resolution: row.resolution,
+    page_url: row.page_url,
+    deleted_at: row.deleted_at,
+    updated_by_email: row.updated_by_email,
+    updated_by_source: row.updated_by_source,
+    fixed_at: row.fixed_at,
+    fixed_by_email: row.fixed_by_email,
+    fix_commit_sha: row.fix_commit_sha,
+    fix_commit_url: row.fix_commit_url,
+    updated_at: row.updated_at,
+  };
+}
+
+async function insertReportAuditEvent(
+  env: Env,
+  reportId: string,
+  actor: MutationActor,
+  action: string,
+  before: ReportAuditSnapshot | null,
+  after: ReportAuditSnapshot | null,
+) {
+  await env.DB.prepare(
+    `INSERT INTO report_audit_events (id, report_id, actor_email, actor_source, action, before_json, after_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      uuid(),
+      reportId,
+      actor.email,
+      actor.source,
+      action,
+      before ? JSON.stringify(before) : null,
+      after ? JSON.stringify(after) : null,
+    )
+    .run();
+}
+
+async function getReportForAudit(env: Env, id: string): Promise<Record<string, unknown> | null> {
+  return await env.DB.prepare(
+    `SELECT id, title, note, severity, status, resolution, page_url, deleted_at,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, updated_at
+     FROM reports
+     WHERE id = ?
+     LIMIT 1`,
+  )
+    .bind(id)
+    .first() as Record<string, unknown> | null;
+}
+
+async function getLatestFixedEvent(env: Env, reportId: string): Promise<Record<string, unknown> | null> {
+  return await env.DB.prepare(
+    `SELECT id, report_id, actor_email, actor_source, action, before_json, after_json, created_at
+     FROM report_audit_events
+     WHERE report_id = ? AND json_extract(after_json, '$.status') = 'fixed'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+  )
+    .bind(reportId)
+    .first() as Record<string, unknown> | null;
 }
 
 interface NormalizedElement {
@@ -309,6 +412,124 @@ async function canAccessReport(c: any, report: { reporter_email: string }): Prom
   return normalizeEmail(report.reporter_email) === normalizeEmail(user.email);
 }
 
+interface AnalyticsReportRow {
+  id: string;
+  project: string | null;
+  reporter_email: string | null;
+  severity: string | null;
+  status: string | null;
+  page_url: string | null;
+  console_count: number | null;
+  network_count: number | null;
+  screenshot_key: string | null;
+  created_at: string;
+}
+
+interface CounterMap {
+  [key: string]: number;
+}
+
+interface AnalyticsTotals {
+  reports: number;
+  projects: number;
+  open: number;
+  active: number;
+  done: number;
+  withLogs: number;
+  withScreenshots: number;
+  lastReportAt: string | null;
+}
+
+function incrementCounter(counter: CounterMap, key: string | null | undefined, amount = 1): void {
+  const normalized = key?.trim() || "Unspecified";
+  counter[normalized] = (counter[normalized] ?? 0) + amount;
+}
+
+function getUrlDomain(url: string | null | undefined): string {
+  if (!url) return "No URL";
+  try {
+    return new URL(url).hostname || "No URL";
+  } catch {
+    return "Invalid URL";
+  }
+}
+
+function toSortedBreakdown(counter: CounterMap): Array<{ name: string; count: number }> {
+  return Object.entries(counter)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function makeEmptyCounters(): { byStatus: CounterMap; bySeverity: CounterMap; byReporter: CounterMap; byDomain: CounterMap } {
+  return { byStatus: {}, bySeverity: {}, byReporter: {}, byDomain: {} };
+}
+
+function dayKey(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function parseAnalyticsDays(value: string | undefined): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return [7, 14, 30, 90].includes(parsed) ? parsed : 14;
+}
+
+function startOfUtcDay(value: Date): Date {
+  const copy = new Date(value);
+  copy.setUTCHours(0, 0, 0, 0);
+  return copy;
+}
+
+function addUtcDays(value: Date, days: number): Date {
+  const copy = new Date(value);
+  copy.setUTCDate(copy.getUTCDate() + days);
+  return copy;
+}
+
+function rowCreatedAt(row: AnalyticsReportRow): Date | null {
+  const created = new Date(row.created_at);
+  return Number.isNaN(created.getTime()) ? null : created;
+}
+
+function isActiveStatus(status: string): boolean {
+  return status === "investigating" || status === "in_progress";
+}
+
+function isDoneStatus(status: string): boolean {
+  return status === "fixed" || status === "resolved" || status === "closed";
+}
+
+function summarizeRows(rows: AnalyticsReportRow[]): AnalyticsTotals {
+  const projects = new Set<string>();
+  let open = 0;
+  let active = 0;
+  let done = 0;
+  let withLogs = 0;
+  let withScreenshots = 0;
+  let lastReportAt: string | null = null;
+
+  for (const row of rows) {
+    projects.add(row.project?.trim() || "default");
+    const status = row.status?.trim() || "open";
+    if (status === "open") open += 1;
+    if (isActiveStatus(status)) active += 1;
+    if (isDoneStatus(status)) done += 1;
+    if ((row.console_count ?? 0) + (row.network_count ?? 0) > 0) withLogs += 1;
+    if (row.screenshot_key) withScreenshots += 1;
+    if (!lastReportAt || row.created_at > lastReportAt) lastReportAt = row.created_at;
+  }
+
+  return {
+    reports: rows.length,
+    projects: projects.size,
+    open,
+    active,
+    done,
+    withLogs,
+    withScreenshots,
+    lastReportAt,
+  };
+}
+
 // GET /access — does the current user have tester capabilities?
 reports.get("/access", requireAuth, async (c) => {
   const user = c.get("user");
@@ -399,6 +620,10 @@ reports.get("/", requireAuth, requireTester, async (c) => {
   const user = c.get("user");
   const admin = isAdminEmail(user.email, c.env.ADMIN_EMAILS);
   const project = c.req.query("project");
+  const requestedLimit = Number(c.req.query("limit") ?? 200);
+  const requestedOffset = Number(c.req.query("offset") ?? 0);
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200, 1), 500);
+  const offset = Math.max(Number.isFinite(requestedOffset) ? Math.floor(requestedOffset) : 0, 0);
 
   const filters: string[] = [];
   const binds: unknown[] = [];
@@ -412,17 +637,190 @@ reports.get("/", requireAuth, requireTester, async (c) => {
   }
   filters.push("deleted_at IS NULL");
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS total FROM reports ${where}`)
+    .bind(...binds)
+    .first<{ total: number }>();
 
   const { results } = await c.env.DB.prepare(
     `SELECT id, project, reporter_email, reporter_name, title, note, severity, status,
             page_url, element_selector, console_count, network_count, screenshot_key,
-            created_at, updated_at
-     FROM reports ${where} ORDER BY created_at DESC LIMIT 200`,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, created_at, updated_at
+     FROM reports ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
   )
-    .bind(...binds)
+    .bind(...binds, limit, offset)
     .all();
 
-  return c.json({ reports: results ?? [] });
+  return c.json({
+    reports: results ?? [],
+    total: totalRow?.total ?? 0,
+    limit,
+    offset,
+  });
+});
+
+// GET /analytics — summarized report analytics. Admins see all projects;
+// testers see only their own report activity.
+reports.get("/analytics", requireAuth, requireTester, async (c) => {
+  const user = c.get("user");
+  const admin = isAdminEmail(user.email, c.env.ADMIN_EMAILS);
+  const days = parseAnalyticsDays(c.req.query("days"));
+  const filters: string[] = ["deleted_at IS NULL"];
+  const binds: unknown[] = [];
+
+  if (!admin) {
+    filters.push("reporter_email = ?");
+    binds.push(normalizeEmail(user.email));
+  }
+
+  const where = `WHERE ${filters.join(" AND ")}`;
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, project, reporter_email, severity, status, page_url,
+            console_count, network_count, screenshot_key, created_at
+     FROM reports ${where}
+     ORDER BY created_at DESC`,
+  )
+    .bind(...binds)
+    .all<AnalyticsReportRow>();
+
+  const rows = results ?? [];
+  const today = startOfUtcDay(new Date());
+  const currentStart = addUtcDays(today, -(days - 1));
+  const currentEnd = addUtcDays(today, 1);
+  const previousStart = addUtcDays(currentStart, -days);
+  const previousEnd = currentStart;
+  const currentPeriodRows: AnalyticsReportRow[] = [];
+  const previousPeriodRows: AnalyticsReportRow[] = [];
+  const global = makeEmptyCounters();
+  const projectMap = new Map<string, {
+    project: string;
+    total: number;
+    open: number;
+    active: number;
+    done: number;
+    withLogs: number;
+    withScreenshots: number;
+    lastReportAt: string | null;
+    byStatus: CounterMap;
+    bySeverity: CounterMap;
+    byReporter: CounterMap;
+    byDomain: CounterMap;
+  }>();
+
+  const recentDays = Array.from({ length: days }, (_, index) => {
+    const date = addUtcDays(currentStart, index);
+    return dayKey(date);
+  });
+  const recentCounts = Object.fromEntries(recentDays.map((day) => [day, 0])) as CounterMap;
+
+  let withLogs = 0;
+  let withScreenshots = 0;
+  let lastReportAt: string | null = null;
+
+  for (const row of rows) {
+    const project = row.project?.trim() || "default";
+    const status = row.status?.trim() || "open";
+    const severity = row.severity?.trim() || "Unspecified";
+    const reporter = normalizeEmail(row.reporter_email ?? "") || "Unknown reporter";
+    const domain = getUrlDomain(row.page_url);
+    const logCount = (row.console_count ?? 0) + (row.network_count ?? 0);
+    const hasLogs = logCount > 0;
+    const hasScreenshot = Boolean(row.screenshot_key);
+
+    let projectSummary = projectMap.get(project);
+    if (!projectSummary) {
+      projectSummary = {
+        project,
+        total: 0,
+        open: 0,
+        active: 0,
+        done: 0,
+        withLogs: 0,
+        withScreenshots: 0,
+        lastReportAt: null,
+        ...makeEmptyCounters(),
+      };
+      projectMap.set(project, projectSummary);
+    }
+
+    projectSummary.total += 1;
+    if (status === "open") projectSummary.open += 1;
+    if (isActiveStatus(status)) projectSummary.active += 1;
+    if (isDoneStatus(status)) projectSummary.done += 1;
+    if (hasLogs) projectSummary.withLogs += 1;
+    if (hasScreenshot) projectSummary.withScreenshots += 1;
+    if (!projectSummary.lastReportAt || row.created_at > projectSummary.lastReportAt) {
+      projectSummary.lastReportAt = row.created_at;
+    }
+
+    incrementCounter(projectSummary.byStatus, status);
+    incrementCounter(projectSummary.bySeverity, severity);
+    incrementCounter(projectSummary.byReporter, reporter);
+    incrementCounter(projectSummary.byDomain, domain);
+
+    incrementCounter(global.byStatus, status);
+    incrementCounter(global.bySeverity, severity);
+    incrementCounter(global.byReporter, reporter);
+    incrementCounter(global.byDomain, domain);
+
+    if (hasLogs) withLogs += 1;
+    if (hasScreenshot) withScreenshots += 1;
+    if (!lastReportAt || row.created_at > lastReportAt) lastReportAt = row.created_at;
+
+    const created = rowCreatedAt(row);
+    if (created) {
+      const createdDay = dayKey(created);
+      if (createdDay in recentCounts) recentCounts[createdDay] += 1;
+      if (created >= currentStart && created < currentEnd) currentPeriodRows.push(row);
+      if (created >= previousStart && created < previousEnd) previousPeriodRows.push(row);
+    }
+  }
+
+  const projects = [...projectMap.values()]
+    .map((project) => ({
+      project: project.project,
+      total: project.total,
+      open: project.open,
+      active: project.active,
+      done: project.done,
+      withLogs: project.withLogs,
+      withScreenshots: project.withScreenshots,
+      lastReportAt: project.lastReportAt,
+      primaryDomain: toSortedBreakdown(project.byDomain).find((item) => item.name !== "No URL" && item.name !== "Invalid URL")?.name ?? null,
+      byStatus: toSortedBreakdown(project.byStatus),
+      bySeverity: toSortedBreakdown(project.bySeverity),
+      byReporter: toSortedBreakdown(project.byReporter).slice(0, 8),
+      byDomain: toSortedBreakdown(project.byDomain).slice(0, 8),
+    }))
+    .sort((a, b) => b.total - a.total || a.project.localeCompare(b.project));
+
+  return c.json({
+    period: {
+      days,
+      currentStart: dayKey(currentStart),
+      currentEnd: dayKey(addUtcDays(currentEnd, -1)),
+      previousStart: dayKey(previousStart),
+      previousEnd: dayKey(addUtcDays(previousEnd, -1)),
+    },
+    totals: {
+      reports: rows.length,
+      projects: projects.length,
+      open: global.byStatus.open ?? 0,
+      active: (global.byStatus.investigating ?? 0) + (global.byStatus.in_progress ?? 0),
+      done: (global.byStatus.fixed ?? 0) + (global.byStatus.resolved ?? 0) + (global.byStatus.closed ?? 0),
+      withLogs,
+      withScreenshots,
+      lastReportAt,
+    },
+    periodTotals: summarizeRows(currentPeriodRows),
+    previousPeriodTotals: summarizeRows(previousPeriodRows),
+    byStatus: toSortedBreakdown(global.byStatus),
+    bySeverity: toSortedBreakdown(global.bySeverity),
+    byReporter: toSortedBreakdown(global.byReporter).slice(0, 12),
+    byDomain: toSortedBreakdown(global.byDomain).slice(0, 12),
+    recentTrend: recentDays.map((date) => ({ date, count: recentCounts[date] ?? 0 })),
+    projects,
+  });
 });
 
 async function serveR2(c: any, key: string | null) {
@@ -447,15 +845,33 @@ reports.post("/bulk", requireAuth, requireTester, async (c) => {
   const placeholders = ids.map(() => "?").join(",");
   const accessFilter = admin ? "" : " AND reporter_email = ?";
   const accessBinds = admin ? [] : [normalizeEmail(user.email)];
+  const actor = dashboardActor(user.email);
 
   if (body.delete === true) {
-    const result = await c.env.DB.prepare(
-      `UPDATE reports
-       SET deleted_at = COALESCE(deleted_at, datetime('now')), updated_at = datetime('now')
+    const { results: beforeRows } = await c.env.DB.prepare(
+    `SELECT id, title, note, severity, status, resolution, page_url, deleted_at,
+              updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+              fix_commit_sha, fix_commit_url, updated_at
+       FROM reports
        WHERE id IN (${placeholders}) AND deleted_at IS NULL${accessFilter}`,
     )
       .bind(...ids, ...accessBinds)
+      .all<Record<string, unknown>>();
+    const result = await c.env.DB.prepare(
+      `UPDATE reports
+       SET deleted_at = COALESCE(deleted_at, datetime('now')),
+           updated_by_email = ?,
+           updated_by_source = ?,
+           updated_at = datetime('now')
+       WHERE id IN (${placeholders}) AND deleted_at IS NULL${accessFilter}`,
+    )
+      .bind(actor.email, actor.source, ...ids, ...accessBinds)
       .run();
+    for (const before of beforeRows ?? []) {
+      const reportId = String(before.id);
+      const after = await getReportForAudit(c.env, reportId);
+      await insertReportAuditEvent(c.env, reportId, actor, "delete", auditSnapshot(before), auditSnapshot(after));
+    }
     return c.json({ updated: result.meta?.changes ?? 0 });
   }
 
@@ -463,25 +879,69 @@ reports.post("/bulk", requireAuth, requireTester, async (c) => {
   if (!status) return c.json({ error: "Bad Request", message: "status or delete is required" }, 400);
   if (!admin) return c.json({ error: "Forbidden" }, 403);
 
-  const result = await c.env.DB.prepare(
-    `UPDATE reports SET status = ?, updated_at = datetime('now')
+  const { results: beforeRows } = await c.env.DB.prepare(
+    `SELECT id, title, note, severity, status, resolution, page_url, deleted_at,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, updated_at
+     FROM reports
      WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
   )
-    .bind(status, ...ids)
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+
+  const result = await c.env.DB.prepare(
+    `UPDATE reports
+     SET status = ?,
+         fixed_at = CASE WHEN ? = 'fixed' AND fixed_at IS NULL THEN datetime('now') ELSE fixed_at END,
+         fixed_by_email = CASE WHEN ? = 'fixed' AND fixed_by_email IS NULL THEN ? ELSE fixed_by_email END,
+         updated_by_email = ?,
+         updated_by_source = ?,
+         updated_at = datetime('now')
+     WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+  )
+    .bind(status, status, status, actor.email, actor.email, actor.source, ...ids)
     .run();
+
+  for (const before of beforeRows ?? []) {
+    const reportId = String(before.id);
+    const after = await getReportForAudit(c.env, reportId);
+    await insertReportAuditEvent(c.env, reportId, actor, "status_update", auditSnapshot(before), auditSnapshot(after));
+  }
 
   return c.json({ updated: result.meta?.changes ?? 0 });
 });
 
+// GET /:id/audit — recent audit events for a report (admin or owner).
+reports.get("/:id/audit", requireAuth, requireTester, async (c) => {
+  const id = c.req.param("id");
+  const report = await c.env.DB.prepare("SELECT reporter_email FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1")
+    .bind(id)
+    .first();
+  if (!report) return c.json({ error: "Not Found" }, 404);
+  if (!(await canAccessReport(c, report as { reporter_email: string }))) return c.json({ error: "Forbidden" }, 403);
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, report_id, actor_email, actor_source, action, before_json, after_json, created_at
+     FROM report_audit_events
+     WHERE report_id = ?
+     ORDER BY created_at DESC
+     LIMIT 50`,
+  )
+    .bind(id)
+    .all();
+  return c.json({ events: results ?? [] });
+});
+
 // GET /:id — full report (admin or owner)
 reports.get("/:id", requireAuth, requireTester, async (c) => {
-  const id = c.req.param("id");
+  const id = c.req.param("id") ?? "";
   const report = await c.env.DB.prepare("SELECT * FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1").bind(id).first();
   if (!report) return c.json({ error: "Not Found" }, 404);
   if (!(await canAccessReport(c, report as { reporter_email: string }))) {
     return c.json({ error: "Forbidden" }, 403);
   }
-  return c.json({ report });
+  const latestFixedEvent = await getLatestFixedEvent(c.env, id);
+  return c.json({ report: { ...(report as Record<string, unknown>), latest_fixed_event: latestFixedEvent } });
 });
 
 // Resolve the ordered list of screenshot R2 keys for a report row, tolerating
@@ -546,10 +1006,13 @@ reports.get("/:id/logs/:type", requireAuth, requireTester, async (c) => {
 
 // PATCH /:id — admin updates report details and triage fields.
 reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
-  const id = c.req.param("id");
+  const user = c.get("user");
+  const actor = dashboardActor(user.email);
+  const id = c.req.param("id") ?? "";
   const body = await c.req.json<Record<string, unknown>>();
   const updates: string[] = [];
   const binds: unknown[] = [];
+  let nextStatus: string | null = null;
 
   function setField(column: string, value: unknown) {
     updates.push(`${column} = ?`);
@@ -566,8 +1029,13 @@ reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
   }
   if ("status" in body) {
     const status = normalizeStatus(body.status);
-    if (status) setField("status", status);
+    if (status) {
+      nextStatus = status;
+      setField("status", status);
+    }
   }
+  if ("fix_commit_sha" in body) setField("fix_commit_sha", normalizeCommitSha(body.fix_commit_sha));
+  if ("fix_commit_url" in body) setField("fix_commit_url", normalizeCommitUrl(body.fix_commit_url));
   if ("resolution" in body) {
     setField("resolution", typeof body.resolution === "string" && body.resolution.trim()
       ? body.resolution.trim().slice(0, 4000)
@@ -575,6 +1043,16 @@ reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
   }
 
   if (updates.length === 0) return c.json({ error: "Bad Request", message: "No valid fields to update" }, 400);
+  const before = await getReportForAudit(c.env, id);
+  if (!before || before.deleted_at) return c.json({ error: "Not Found" }, 404);
+  if (nextStatus === "fixed" && !before.fixed_at) {
+    setField("fixed_at", new Date().toISOString());
+  }
+  if (nextStatus === "fixed" && !before.fixed_by_email) {
+    setField("fixed_by_email", actor.email);
+  }
+  setField("updated_by_email", actor.email);
+  setField("updated_by_source", actor.source);
   binds.push(id);
 
   const result = await c.env.DB.prepare(
@@ -584,6 +1062,8 @@ reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
     .run();
 
   if (!result.meta || result.meta.changes === 0) return c.json({ error: "Not Found" }, 404);
+  const after = await getReportForAudit(c.env, id);
+  await insertReportAuditEvent(c.env, id, actor, nextStatus ? "status_update" : "report_update", auditSnapshot(before), auditSnapshot(after));
   return c.json({ id });
 });
 
@@ -592,19 +1072,26 @@ reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
 reports.delete("/:id", requireAuth, requireTester, async (c) => {
   const user = c.get("user");
   const admin = isAdminEmail(user.email, c.env.ADMIN_EMAILS);
-  const id = c.req.param("id");
+  const actor = dashboardActor(user.email);
+  const id = c.req.param("id") ?? "";
   const accessFilter = admin ? "" : " AND reporter_email = ?";
   const binds = admin ? [id] : [id, normalizeEmail(user.email)];
+  const before = await getReportForAudit(c.env, id);
 
   const result = await c.env.DB.prepare(
     `UPDATE reports
-     SET deleted_at = COALESCE(deleted_at, datetime('now')), updated_at = datetime('now')
+     SET deleted_at = COALESCE(deleted_at, datetime('now')),
+         updated_by_email = ?,
+         updated_by_source = ?,
+         updated_at = datetime('now')
      WHERE id = ? AND deleted_at IS NULL${accessFilter}`,
   )
-    .bind(...binds)
+    .bind(actor.email, actor.source, ...binds)
     .run();
 
   if (!result.meta || result.meta.changes === 0) return c.json({ error: "Not Found" }, 404);
+  const after = await getReportForAudit(c.env, id);
+  await insertReportAuditEvent(c.env, id, actor, "delete", auditSnapshot(before), auditSnapshot(after));
   return c.json({ id });
 });
 

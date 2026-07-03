@@ -32,6 +32,13 @@ type McpTokenRow = {
   revoked_at: string | null;
 };
 
+interface MutationActor {
+  email: string;
+  source: "mcp";
+}
+
+type ReportAuditSnapshot = Record<string, unknown>;
+
 const mcp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 function sanitizeTokenName(value: unknown): string {
@@ -103,6 +110,12 @@ function normalizeStatus(value: unknown): string | null {
   return ALLOWED_STATUSES.has(lower) ? lower : null;
 }
 
+function normalizeCommitSha(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[0-9a-f]{7,40}$/i.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
 function normalizeReportIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value
@@ -119,6 +132,93 @@ function sanitizeResolution(value: unknown): string | null {
     .trim()
     .slice(0, 4000);
   return cleaned || null;
+}
+
+function normalizeCommitUrl(value: unknown): string | null {
+  const cleaned = sanitizeResolution(value)?.slice(0, 500);
+  if (!cleaned) return null;
+  try {
+    const url = new URL(cleaned);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function mcpMutationActor(actor: { email: string }): MutationActor {
+  const email = normalizeEmail(actor.email);
+  if (!email) throw new Error("Updater email is required");
+  return { email, source: "mcp" };
+}
+
+function auditSnapshot(row: Record<string, unknown> | null): ReportAuditSnapshot | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    note: row.note,
+    severity: row.severity,
+    status: row.status,
+    resolution: row.resolution,
+    page_url: row.page_url,
+    deleted_at: row.deleted_at,
+    updated_by_email: row.updated_by_email,
+    updated_by_source: row.updated_by_source,
+    fixed_at: row.fixed_at,
+    fixed_by_email: row.fixed_by_email,
+    fix_commit_sha: row.fix_commit_sha,
+    fix_commit_url: row.fix_commit_url,
+    updated_at: row.updated_at,
+  };
+}
+
+async function insertReportAuditEvent(
+  c: any,
+  reportId: string,
+  actor: MutationActor,
+  action: string,
+  before: ReportAuditSnapshot | null,
+  after: ReportAuditSnapshot | null,
+) {
+  await c.env.DB.prepare(
+    `INSERT INTO report_audit_events (id, report_id, actor_email, actor_source, action, before_json, after_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      uuid(),
+      reportId,
+      actor.email,
+      actor.source,
+      action,
+      before ? JSON.stringify(before) : null,
+      after ? JSON.stringify(after) : null,
+    )
+    .run();
+}
+
+async function getReportForAudit(c: any, id: string): Promise<Record<string, unknown> | null> {
+  return await c.env.DB.prepare(
+    `SELECT id, title, note, severity, status, resolution, page_url, deleted_at,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, updated_at
+     FROM reports
+     WHERE id = ?
+     LIMIT 1`,
+  )
+    .bind(id)
+    .first() as Record<string, unknown> | null;
+}
+
+async function getLatestFixedEvent(c: any, reportId: string): Promise<Record<string, unknown> | null> {
+  return await c.env.DB.prepare(
+    `SELECT id, report_id, actor_email, actor_source, action, before_json, after_json, created_at
+     FROM report_audit_events
+     WHERE report_id = ? AND json_extract(after_json, '$.status') = 'fixed'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+  )
+    .bind(reportId)
+    .first() as Record<string, unknown> | null;
 }
 
 async function listReportsForActor(c: any, actor: { email: string; isAdmin: boolean }, args: Record<string, unknown>) {
@@ -143,7 +243,8 @@ async function listReportsForActor(c: any, actor: { email: string; isAdmin: bool
     `SELECT id, project, reporter_email, reporter_name, title, note, severity, status,
             page_url, element_selector, console_count, network_count,
             CASE WHEN screenshot_key IS NULL THEN 0 ELSE 1 END AS has_screenshot,
-            created_at, updated_at
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, created_at, updated_at
      FROM reports
      WHERE ${filters.join(" AND ")}
      ORDER BY created_at DESC
@@ -168,14 +269,18 @@ async function getAccessibleReport(c: any, actor: { email: string; isAdmin: bool
 }
 
 async function getReportSummary(c: any, id: string) {
-  return await c.env.DB.prepare(
-    `SELECT id, project, title, status, resolution, updated_at
+  const report = await c.env.DB.prepare(
+    `SELECT id, project, title, status, resolution,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, updated_at
      FROM reports
      WHERE id = ? AND deleted_at IS NULL
      LIMIT 1`,
   )
     .bind(id)
     .first();
+  if (!report) return report;
+  return { ...(report as Record<string, unknown>), latest_fixed_event: await getLatestFixedEvent(c, id) };
 }
 
 async function updateReportStatusForActor(
@@ -193,6 +298,11 @@ async function updateReportStatusForActor(
   if (!status) {
     throw new Error(`status must be one of: ${[...ALLOWED_STATUSES].join(", ")}`);
   }
+  const actorMeta = mcpMutationActor(actor);
+  const before = await getReportForAudit(c, args.id.trim());
+  if (!before || before.deleted_at) {
+    throw new Error("Report not found");
+  }
 
   const updates = ["status = ?"];
   const binds: unknown[] = [status];
@@ -200,6 +310,25 @@ async function updateReportStatusForActor(
     updates.push("resolution = ?");
     binds.push(sanitizeResolution(args.resolution));
   }
+  if ("fix_commit_sha" in args) {
+    updates.push("fix_commit_sha = ?");
+    binds.push(normalizeCommitSha(args.fix_commit_sha));
+  }
+  if ("fix_commit_url" in args) {
+    updates.push("fix_commit_url = ?");
+    binds.push(normalizeCommitUrl(args.fix_commit_url));
+  }
+  if (status === "fixed" && !before.fixed_at) {
+    updates.push("fixed_at = datetime('now')");
+  }
+  if (status === "fixed" && !before.fixed_by_email) {
+    updates.push("fixed_by_email = ?");
+    binds.push(actorMeta.email);
+  }
+  updates.push("updated_by_email = ?");
+  binds.push(actorMeta.email);
+  updates.push("updated_by_source = ?");
+  binds.push(actorMeta.source);
   binds.push(args.id.trim());
 
   const result = await c.env.DB.prepare(
@@ -213,6 +342,8 @@ async function updateReportStatusForActor(
   if (!result.meta || result.meta.changes === 0) {
     throw new Error("Report not found");
   }
+  const after = await getReportForAudit(c, args.id.trim());
+  await insertReportAuditEvent(c, args.id.trim(), actorMeta, "status_update", auditSnapshot(before), auditSnapshot(after));
   return await getReportSummary(c, args.id.trim());
 }
 
@@ -232,13 +363,35 @@ async function bulkUpdateReportStatusForActor(
   }
 
   const placeholders = ids.map(() => "?").join(",");
-  const result = await c.env.DB.prepare(
-    `UPDATE reports
-     SET status = ?, updated_at = datetime('now')
+  const actorMeta = mcpMutationActor(actor);
+  const beforeResult = await c.env.DB.prepare(
+    `SELECT id, title, note, severity, status, resolution, page_url, deleted_at,
+            updated_by_email, updated_by_source, fixed_at, fixed_by_email,
+            fix_commit_sha, fix_commit_url, updated_at
+     FROM reports
      WHERE deleted_at IS NULL AND id IN (${placeholders})`,
   )
-    .bind(status, ...ids)
+    .bind(...ids)
+    .all();
+  const beforeRows = (beforeResult.results ?? []) as Record<string, unknown>[];
+  const result = await c.env.DB.prepare(
+    `UPDATE reports
+     SET status = ?,
+         fixed_at = CASE WHEN ? = 'fixed' AND fixed_at IS NULL THEN datetime('now') ELSE fixed_at END,
+         fixed_by_email = CASE WHEN ? = 'fixed' AND fixed_by_email IS NULL THEN ? ELSE fixed_by_email END,
+         updated_by_email = ?,
+         updated_by_source = ?,
+         updated_at = datetime('now')
+     WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+  )
+    .bind(status, status, status, actorMeta.email, actorMeta.email, actorMeta.source, ...ids)
     .run();
+
+  for (const before of beforeRows ?? []) {
+    const reportId = String(before.id);
+    const after = await getReportForAudit(c, reportId);
+    await insertReportAuditEvent(c, reportId, actorMeta, "status_update", auditSnapshot(before), auditSnapshot(after));
+  }
 
   return {
     requested: ids.length,
@@ -300,8 +453,19 @@ const tools = [
     },
   },
   {
+    name: "get_report_audit_log",
+    description: "Fetch recent audit events for a bug report visible to this MCP token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+      },
+      required: ["id"],
+    },
+  },
+  {
     name: "update_report_status",
-    description: "Update one testing bug report status. Requires an admin MCP token.",
+    description: "Update one testing bug report status. Requires an admin MCP token. Status attribution is recorded in the audit trail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -315,13 +479,21 @@ const tools = [
           type: "string",
           description: "Optional short note describing what fixed or changed.",
         },
+        fix_commit_sha: {
+          type: "string",
+          description: "Optional Git commit SHA that contains the fix.",
+        },
+        fix_commit_url: {
+          type: "string",
+          description: "Optional HTTPS URL for the fixing commit or pull request.",
+        },
       },
       required: ["id", "status"],
     },
   },
   {
     name: "bulk_update_report_status",
-    description: "Update the status of up to 50 testing bug reports. Requires an admin MCP token.",
+    description: "Update the status of up to 50 testing bug reports. Requires an admin MCP token. Status attribution is recorded in the audit trail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -433,8 +605,9 @@ mcp.post("/", async (c) => {
       if (name === "get_report") {
         const report = await getAccessibleReport(c, actor, args.id);
         if (!report) return c.json(rpcError(request.id, -32004, "Report not found"), 404);
+        const latestFixedEvent = await getLatestFixedEvent(c, String(args.id).trim());
         return c.json(rpcResult(request.id, {
-          content: [{ type: "text", text: JSON.stringify({ report }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ report: { ...report, latest_fixed_event: latestFixedEvent } }, null, 2) }],
         }));
       }
       if (name === "get_report_logs") {
@@ -443,6 +616,22 @@ mcp.post("/", async (c) => {
         const logs = await readReportLogs(c, report, args.type);
         return c.json(rpcResult(request.id, {
           content: [{ type: "text", text: JSON.stringify({ logs }, null, 2) }],
+        }));
+      }
+      if (name === "get_report_audit_log") {
+        const report = await getAccessibleReport(c, actor, args.id);
+        if (!report) return c.json(rpcError(request.id, -32004, "Report not found"), 404);
+        const { results } = await c.env.DB.prepare(
+          `SELECT id, report_id, actor_email, actor_source, action, before_json, after_json, created_at
+           FROM report_audit_events
+           WHERE report_id = ?
+           ORDER BY created_at DESC
+           LIMIT 50`,
+        )
+          .bind(String(args.id).trim())
+          .all();
+        return c.json(rpcResult(request.id, {
+          content: [{ type: "text", text: JSON.stringify({ events: results ?? [] }, null, 2) }],
         }));
       }
       if (name === "update_report_status") {

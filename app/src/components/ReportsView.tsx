@@ -1,13 +1,59 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
+import { cn } from "src/lib/utils";
+import { STATUS_PILL_STYLES } from "src/lib/status";
 import { bulkPatchReports, getScreenshotPreview, listReports, patchReport, type ReportRow, type ScreenshotPreview } from "../api";
 import { ReportDetail } from "./ReportDetail";
 import { EmptyReports } from "./Illustrations";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Checkbox } from "./ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "./ui/pagination";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Skeleton } from "./ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 const STATUSES = ["open", "investigating", "in_progress", "fixed", "resolved", "closed"];
+
+// Reports table layout — Tailwind utilities on the shadcn primitives.
+// `min-[900px]` is the desktop breakpoint; below it the status/reporter
+// columns collapse into the stacked mobile fields inside the report cell.
+const CX = {
+  table: "min-w-0 table-fixed min-[900px]:min-w-[860px]",
+  selectCell: "w-10 text-center",
+  statusCell: "hidden w-[148px] min-[900px]:table-cell",
+  reporterCell: "hidden w-[260px] max-w-[260px] truncate text-muted-foreground min-[900px]:table-cell",
+  reportLayout:
+    "grid grid-cols-[76px_minmax(0,1fr)] items-center gap-3 min-[900px]:grid-cols-[88px_minmax(0,1fr)] min-[900px]:gap-3.5",
+  thumb: "block h-[50px] w-[76px] rounded-md border bg-muted object-cover min-[900px]:h-14 min-[900px]:w-[88px]",
+  thumbPlaceholder:
+    "inline-flex h-[50px] w-[76px] items-center justify-center rounded-md border border-dashed bg-muted/45 text-[11px] font-medium text-muted-foreground min-[900px]:h-14 min-[900px]:w-[88px]",
+  reportOpen:
+    "h-auto w-full justify-start whitespace-normal p-0 text-left font-medium leading-snug text-foreground line-clamp-2 hover:text-primary hover:underline underline-offset-[3px]",
+  reportUrl: "mt-1 inline-block max-w-full truncate text-xs font-medium text-primary",
+  reportMeta: "mt-1 flex flex-wrap gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground",
+  mobileFields: "mt-2 flex min-w-0 items-center gap-2.5 min-[900px]:hidden",
+  mobileReporter: "min-w-0 truncate text-xs text-muted-foreground",
+} as const;
 const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 const DONE_STATUSES = new Set(["fixed", "resolved", "closed"]);
 const ACTIVE_STATUSES = new Set(["investigating", "in_progress"]);
-const ROWS_PER_PAGE_OPTIONS = [10, 25, 50, 100] as const;
 
 type StatusFilter = "all" | "open" | "active" | "done";
 type SeverityFilter = "all" | typeof SEVERITIES[number];
@@ -62,6 +108,23 @@ function readableError(message: string): string {
   return message;
 }
 
+function getPaginationItems(currentPage: number, totalPages: number): Array<number | "left-ellipsis" | "right-ellipsis"> {
+  if (totalPages <= 5) return Array.from({ length: totalPages }, (_, index) => index + 1);
+
+  const items: Array<number | "left-ellipsis" | "right-ellipsis"> = [1];
+  const start = Math.max(2, currentPage - 1);
+  const end = Math.min(totalPages - 1, currentPage + 1);
+
+  if (start > 2) items.push("left-ellipsis");
+  for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+    items.push(pageNumber);
+  }
+  if (end < totalPages - 1) items.push("right-ellipsis");
+  items.push(totalPages);
+
+  return items;
+}
+
 export function ReportsView({ isAdmin, getToken }: Props) {
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [thumbnailPreviews, setThumbnailPreviews] = useState<Record<string, ScreenshotPreview>>({});
@@ -93,30 +156,35 @@ export function ReportsView({ isAdmin, getToken }: Props) {
     return Boolean(report.screenshot_key);
   };
 
-  const filteredReports = useMemo(() => reports.filter((report) => (
-    matchesStatus(report, filters.status)
-    && (filters.severity === "all" || report.severity === filters.severity)
-    && matchesEvidence(report, filters.evidence)
-    && (filters.reporter === "all" || report.reporter_email === filters.reporter)
-    && (filters.project === "all" || report.project === filters.project)
-    && (filters.domains.length === 0 || filters.domains.includes(getDomain(report.page_url)))
-  )), [filters, reports]);
+  const matchesFilters = (report: ReportRow, activeFilters: ReportFilters) => (
+    matchesStatus(report, activeFilters.status)
+    && (activeFilters.severity === "all" || report.severity === activeFilters.severity)
+    && matchesEvidence(report, activeFilters.evidence)
+    && (activeFilters.reporter === "all" || report.reporter_email === activeFilters.reporter)
+    && (activeFilters.project === "all" || report.project === activeFilters.project)
+    && (activeFilters.domains.length === 0 || activeFilters.domains.includes(getDomain(report.page_url)))
+  );
+
+  const filteredReports = useMemo(() => reports.filter((report) => matchesFilters(report, filters)), [filters, reports]);
   const totalPages = Math.max(1, Math.ceil(filteredReports.length / rowsPerPage));
   const currentPage = Math.min(page, totalPages);
   const pageStartIndex = (currentPage - 1) * rowsPerPage;
+  const pageEndIndex = Math.min(pageStartIndex + rowsPerPage, filteredReports.length);
+  const pageItems = getPaginationItems(currentPage, totalPages);
   const paginatedReports = useMemo(
     () => filteredReports.slice(pageStartIndex, pageStartIndex + rowsPerPage),
     [filteredReports, pageStartIndex, rowsPerPage],
   );
-  const pageStartLabel = filteredReports.length === 0 ? 0 : pageStartIndex + 1;
-  const pageEndLabel = Math.min(pageStartIndex + rowsPerPage, filteredReports.length);
   const visibleIds = paginatedReports.map((report) => report.id);
   const visibleSelectedCount = visibleIds.filter((id) => selectedIds.has(id)).length;
   const allVisibleSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
   const selectedCount = selectedIds.size;
   const blockingError = Boolean(error && reports.length === 0 && !loading);
 
-  const countWhere = (matches: (report: ReportRow) => boolean) => reports.filter(matches).length;
+  const countForFilters = (nextFilters: ReportFilters) => (
+    reports.filter((report) => matchesFilters(report, nextFilters)).length
+  );
+  const countFor = (patch: Partial<ReportFilters>) => countForFilters({ ...filters, ...patch });
 
   const toggleDomain = (domain: string) => {
     setFilters((current) => ({
@@ -287,264 +355,350 @@ export function ReportsView({ isAdmin, getToken }: Props) {
     setPage(Math.min(Math.max(nextPage, 1), totalPages));
   };
 
-  const paginationControls = filteredReports.length > 0 ? (
-    <div className="pagination-bar" aria-label="Report pagination">
-      <div className="pagination-summary">
-        <strong>{pageStartLabel}-{pageEndLabel}</strong>
-        <span>of {filteredReports.length}</span>
-        {filteredReports.length !== reports.length ? <span>filtered from {reports.length}</span> : null}
-      </div>
-      <label className="rows-control">
-        <span>Rows</span>
-        <select
-          value={rowsPerPage}
-          aria-label="Rows per page"
-          onChange={(event) => setRowsPerPage(Number(event.target.value))}
+  const renderStatusControl = (report: ReportRow) => (
+    isAdmin ? (
+      <Select
+        value={report.status}
+        disabled={updatingStatus === report.id}
+        onValueChange={(value) => void updateStatus(report, value)}
+      >
+        <SelectTrigger
+          className={cn(
+            "h-[30px] w-[124px] rounded-full px-2.5 text-xs font-medium capitalize disabled:cursor-wait",
+            STATUS_PILL_STYLES[report.status],
+          )}
+          aria-label={`Update status for ${report.title}`}
+          onClick={(event) => event.stopPropagation()}
         >
-          {ROWS_PER_PAGE_OPTIONS.map((option) => (
-            <option key={option} value={option}>{option}</option>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {STATUSES.map((status) => (
+            <SelectItem key={status} value={status}>{status.replace("_", " ")}</SelectItem>
           ))}
-        </select>
-      </label>
-      <div className="page-controls">
-        <button className="page-btn" type="button" onClick={() => goToPage(1)} disabled={currentPage === 1} aria-label="First page">«</button>
-        <button className="page-btn" type="button" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1} aria-label="Previous page">‹</button>
-        <span className="page-count">Page {currentPage} of {totalPages}</span>
-        <button className="page-btn" type="button" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages} aria-label="Next page">›</button>
-        <button className="page-btn" type="button" onClick={() => goToPage(totalPages)} disabled={currentPage === totalPages} aria-label="Last page">»</button>
+        </SelectContent>
+      </Select>
+    ) : (
+      <Badge
+        variant="outline"
+        className={cn("rounded-full capitalize", STATUS_PILL_STYLES[report.status])}
+      >
+        {report.status.replace("_", " ")}
+      </Badge>
+    )
+  );
+
+  const paginationControls = filteredReports.length > 0 ? (
+    <div className="mt-4 flex flex-col gap-3 border-t pt-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <span>Rows per page</span>
+          <Select
+            value={String(rowsPerPage)}
+            onValueChange={(value) => setRowsPerPage(Number(value))}
+          >
+            <SelectTrigger className="h-9 w-[118px]" aria-label="Rows per page">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[10, 25, 50, 100].map((size) => (
+                <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <span>
+          Showing {pageStartIndex + 1} to {pageEndIndex} of {filteredReports.length} entries
+        </span>
       </div>
+      <Pagination className="mx-0 w-auto justify-start md:justify-end">
+        <PaginationContent className="flex-wrap justify-start">
+          <PaginationItem>
+            <PaginationPrevious
+              href="#"
+              aria-disabled={currentPage === 1}
+              tabIndex={currentPage === 1 ? -1 : undefined}
+              className={currentPage === 1 ? "pointer-events-none opacity-50" : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                goToPage(currentPage - 1);
+              }}
+            />
+          </PaginationItem>
+          {pageItems.map((item) => (
+            typeof item === "number" ? (
+              <PaginationItem key={item}>
+                <PaginationLink
+                  href="#"
+                  isActive={item === currentPage}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    goToPage(item);
+                  }}
+                >
+                  {item}
+                </PaginationLink>
+              </PaginationItem>
+            ) : (
+              <PaginationItem key={item}>
+                <PaginationEllipsis />
+              </PaginationItem>
+            )
+          ))}
+          <PaginationItem>
+            <PaginationNext
+              href="#"
+              aria-disabled={currentPage === totalPages}
+              tabIndex={currentPage === totalPages ? -1 : undefined}
+              className={currentPage === totalPages ? "pointer-events-none opacity-50" : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                goToPage(currentPage + 1);
+              }}
+            />
+          </PaginationItem>
+        </PaginationContent>
+      </Pagination>
     </div>
   ) : null;
 
   return (
-    <div className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>{isAdmin ? "All reports" : "My reports"}</h3>
-        <button className="btn ghost" onClick={load} disabled={loading}>Refresh</button>
-      </div>
+    <Card>
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle>{isAdmin ? "All reports" : "My reports"}</CardTitle>
+        <Button variant="outline" size="icon" onClick={load} disabled={loading} aria-label="Refresh reports">
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </CardHeader>
+      <CardContent>
       {selectedCount > 0 ? (
-        <div className="bulk-bar" aria-label="Bulk report actions">
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 p-2" aria-label="Bulk report actions">
           <strong>{selectedCount} selected</strong>
           {isAdmin ? (
-            <select
-              className="bulk-select"
+            <Select
               value=""
               disabled={bulkBusy}
-              aria-label="Bulk update status"
-              onChange={(event) => {
-                void bulkUpdateStatus(event.target.value);
-                event.currentTarget.value = "";
-              }}
+              onValueChange={(value) => void bulkUpdateStatus(value)}
             >
-              <option value="">Set status…</option>
-              {STATUSES.map((status) => (
-                <option key={status} value={status}>{status.replace("_", " ")}</option>
-              ))}
-            </select>
+              <SelectTrigger className="w-[170px]" aria-label="Bulk update status"><SelectValue placeholder="Set status…" /></SelectTrigger>
+              <SelectContent>
+                {STATUSES.map((status) => (
+                  <SelectItem key={status} value={status}>{status.replace("_", " ")}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           ) : null}
-          <button className="btn danger" type="button" disabled={bulkBusy} onClick={() => void bulkDelete()}>
+          <Button variant="destructive" type="button" disabled={bulkBusy} onClick={() => void bulkDelete()}>
             {bulkBusy ? "Working…" : "Delete"}
-          </button>
-          <button className="btn ghost" type="button" disabled={bulkBusy} onClick={() => setSelectedIds(new Set())}>
+          </Button>
+          <Button variant="outline" type="button" disabled={bulkBusy} onClick={() => setSelectedIds(new Set())}>
             Clear selection
-          </button>
+          </Button>
         </div>
       ) : null}
-      <div className="filter-chips" aria-label="Report filters">
+      <div className="mb-2 text-sm text-muted-foreground">
+        {filteredReports.length === reports.length
+          ? `${reports.length} reports`
+          : `${filteredReports.length} of ${reports.length} reports`}
+      </div>
+      <div className="mb-3 flex flex-nowrap gap-2 overflow-x-auto pb-2" aria-label="Report filters">
         {filterActive ? (
-          <button className="filter-clear" type="button" onClick={() => setFilters(DEFAULT_FILTERS)}>
+          <Button className="shrink-0" variant="outline" type="button" onClick={() => setFilters(DEFAULT_FILTERS)}>
             Clear
-          </button>
+          </Button>
         ) : null}
-        <select
-          className={`filter-chip-select ${filters.status !== "all" ? "active" : ""}`}
-          aria-label="Filter by status"
+        <Select
           value={filters.status}
-          onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value as StatusFilter }))}
+          onValueChange={(value) => setFilters((current) => ({ ...current, status: value as StatusFilter }))}
         >
-          <option value="all">Status: All ({reports.length})</option>
-          <option value="open">Status: Open ({countWhere((report) => report.status === "open")})</option>
-          <option value="active">Status: In progress ({countWhere((report) => ACTIVE_STATUSES.has(report.status))})</option>
-          <option value="done">Status: Done ({countWhere((report) => DONE_STATUSES.has(report.status))})</option>
-        </select>
-        <select
-          className={`filter-chip-select ${filters.severity !== "all" ? "active" : ""}`}
-          aria-label="Filter by severity"
+          <SelectTrigger className="w-[180px] shrink-0" aria-label="Filter by status"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Status: All</SelectItem>
+            <SelectItem value="open">Status: Open</SelectItem>
+            <SelectItem value="active">Status: In progress</SelectItem>
+            <SelectItem value="done">Status: Done</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
           value={filters.severity}
-          onChange={(event) => setFilters((current) => ({ ...current, severity: event.target.value as SeverityFilter }))}
+          onValueChange={(value) => setFilters((current) => ({ ...current, severity: value as SeverityFilter }))}
         >
-          <option value="all">Severity: All ({reports.length})</option>
-          {SEVERITIES.map((severity) => (
-            <option key={severity} value={severity}>
-              Severity: {severity} ({countWhere((report) => report.severity === severity)})
-            </option>
-          ))}
-        </select>
-        <select
-          className={`filter-chip-select ${filters.evidence !== "all" ? "active" : ""}`}
-          aria-label="Filter by evidence"
+          <SelectTrigger className="w-[190px] shrink-0" aria-label="Filter by severity"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Severity: All</SelectItem>
+            {SEVERITIES.map((severity) => (
+              <SelectItem key={severity} value={severity}>
+                Severity: {severity}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
           value={filters.evidence}
-          onChange={(event) => setFilters((current) => ({ ...current, evidence: event.target.value as EvidenceFilter }))}
+          onValueChange={(value) => setFilters((current) => ({ ...current, evidence: value as EvidenceFilter }))}
         >
-          <option value="all">Evidence: All ({reports.length})</option>
-          <option value="logs">Evidence: Has logs ({countWhere((report) => report.console_count + report.network_count > 0)})</option>
-          <option value="screenshots">Evidence: Has screenshot ({countWhere((report) => Boolean(report.screenshot_key))})</option>
-        </select>
-        <select
-          className={`filter-chip-select ${filters.project !== "all" ? "active" : ""}`}
-          aria-label="Filter by project"
+          <SelectTrigger className="w-[230px] shrink-0" aria-label="Filter by evidence"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Evidence: All</SelectItem>
+            <SelectItem value="logs">Evidence: Has logs</SelectItem>
+            <SelectItem value="screenshots">Evidence: Has screenshot</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
           value={filters.project}
-          onChange={(event) => setFilters((current) => ({ ...current, project: event.target.value }))}
+          onValueChange={(value) => setFilters((current) => ({ ...current, project: value }))}
         >
-          <option value="all">Project: All ({reports.length})</option>
-          {projectOptions.map((project) => (
-            <option key={project} value={project}>
-              {project} ({countWhere((report) => report.project === project)})
-            </option>
-          ))}
-        </select>
-        <details className={`filter-multi ${filters.domains.length > 0 ? "active" : ""}`}>
-          <summary>
-            Domain: {filters.domains.length === 0 ? `All (${reports.length})` : `${filters.domains.length} selected`}
-          </summary>
-          <div className="filter-multi-menu">
+          <SelectTrigger className="w-[210px] shrink-0" aria-label="Filter by project"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Project: All</SelectItem>
+            {projectOptions.map((project) => (
+              <SelectItem key={project} value={project}>
+                {project}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button className="shrink-0" variant="outline">
+              Domain: {filters.domains.length === 0 ? "All" : `${filters.domains.length} selected`}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
             {domainOptions.length === 0 ? (
-              <span className="filter-empty">No domains</span>
+              <div className="px-2 py-1.5 text-sm text-muted-foreground">No domains</div>
             ) : (
               domainOptions.map((domain) => (
-                <label className="filter-check" key={domain}>
-                  <input
-                    type="checkbox"
-                    checked={filters.domains.includes(domain)}
-                    onChange={() => toggleDomain(domain)}
-                  />
-                  <span>{domain}</span>
-                  <span className="filter-option-count">{countWhere((report) => getDomain(report.page_url) === domain)}</span>
-                </label>
+                <DropdownMenuCheckboxItem
+                  key={domain}
+                  checked={filters.domains.includes(domain)}
+                  onCheckedChange={() => toggleDomain(domain)}
+                >
+                  <span className="truncate">{domain}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {countFor({ domains: [domain] })}
+                  </span>
+                </DropdownMenuCheckboxItem>
               ))
             )}
-          </div>
-        </details>
+          </DropdownMenuContent>
+        </DropdownMenu>
         {isAdmin ? (
-          <select
-            className={`filter-chip-select reporter-filter ${filters.reporter !== "all" ? "active" : ""}`}
-            aria-label="Filter by reporter"
+          <Select
             value={filters.reporter}
-            onChange={(event) => setFilters((current) => ({ ...current, reporter: event.target.value }))}
+            onValueChange={(value) => setFilters((current) => ({ ...current, reporter: value }))}
           >
-            <option value="all">Reporter: All ({reports.length})</option>
-            {reporterOptions.map((reporter) => (
-              <option key={reporter} value={reporter}>
-                {reporter} ({countWhere((report) => report.reporter_email === reporter)})
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-[260px] shrink-0" aria-label="Filter by reporter"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Reporter: All</SelectItem>
+              {reporterOptions.map((reporter) => (
+                <SelectItem key={reporter} value={reporter}>
+                  {reporter}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         ) : null}
       </div>
-      {paginationControls}
       {error ? (
-        <div className="error-banner" role="alert">
+        <Alert variant="destructive" className="my-3 flex items-start justify-between gap-3">
           <div>
-            <strong>{blockingError ? "Reports failed to load" : "Action failed"}</strong>
-            <p>{readableError(error)}</p>
+            <AlertTitle>{blockingError ? "Reports failed to load" : "Action failed"}</AlertTitle>
+            <AlertDescription>{readableError(error)}</AlertDescription>
           </div>
-          <button className="btn ghost" type="button" onClick={load} disabled={loading}>
+          <Button variant="outline" type="button" onClick={load} disabled={loading}>
             Retry
-          </button>
-        </div>
+          </Button>
+        </Alert>
       ) : null}
       {loading ? (
-        <div className="table-scroll" aria-label="Loading reports">
-          <table className="reports-table skeleton-table" aria-hidden="true">
-            <thead>
-              <tr>
-                <th className="select-cell" aria-label="Select reports"></th>
-                <th>Report</th>
-                <th>Status</th>
-                {isAdmin ? <th>Reporter</th> : null}
-              </tr>
-            </thead>
-            <tbody>
+        <div aria-label="Loading reports">
+          <Table className={CX.table} aria-hidden="true">
+            <TableHeader>
+              <TableRow>
+                <TableHead className={CX.selectCell} aria-label="Select reports"></TableHead>
+                <TableHead>Report</TableHead>
+                <TableHead className={CX.statusCell}>Status</TableHead>
+                {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {Array.from({ length: 5 }, (_, index) => (
-                <tr key={index}>
-                  <td><span className="skeleton checkbox-skeleton" /></td>
-                  <td>
-                    <div className="report-cell-layout">
-                      <span className="skeleton thumb-skeleton" />
-                      <span className="skeleton line-skeleton title-skeleton" />
+                <TableRow key={index}>
+                  <TableCell><Skeleton className="h-5 w-5 rounded-sm" /></TableCell>
+                  <TableCell>
+                    <div className={CX.reportLayout}>
+                      <Skeleton className="h-[54px] w-[86px] rounded-md" />
+                      <Skeleton className="h-4 w-36" />
                     </div>
-                  </td>
-                  <td><span className="skeleton pill-skeleton" /></td>
-                  {isAdmin ? <td><span className="skeleton line-skeleton reporter-skeleton" /></td> : null}
-                </tr>
+                  </TableCell>
+                  <TableCell className={CX.statusCell}><Skeleton className="h-7 w-24 rounded-full" /></TableCell>
+                  {isAdmin ? <TableCell className={CX.reporterCell}><Skeleton className="h-4 w-40" /></TableCell> : null}
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       ) : blockingError ? null : reports.length === 0 ? (
-        <div className="empty-state">
+        <div className="flex flex-col items-center gap-2.5 p-7 text-center">
           <EmptyReports />
-          <p className="muted">No reports yet. Use the crosshair in any app's bar to file the first one.</p>
+          <p className="text-[13px] text-muted-foreground">No reports yet. Use the crosshair in any app's bar to file the first one.</p>
         </div>
       ) : filteredReports.length === 0 ? (
-        <div className="empty-state">
+        <div className="flex flex-col items-center gap-2.5 p-7 text-center">
           <EmptyReports />
-          <p className="muted">No matching reports for this filter.</p>
+          <p className="text-[13px] text-muted-foreground">No matching reports for this filter.</p>
         </div>
       ) : (
-        <div className="table-scroll" aria-label="Reports table">
-          <table className="reports-table">
-            <thead>
-              <tr>
-                <th className="select-cell">
-                  <input
-                    type="checkbox"
+        <div aria-label="Reports table">
+          <Table className={CX.table}>
+            <TableHeader>
+              <TableRow>
+                <TableHead className={CX.selectCell}>
+                  <Checkbox
                     aria-label={allVisibleSelected ? "Deselect visible reports" : "Select visible reports"}
-                    checked={allVisibleSelected}
-                    ref={(input) => {
-                      if (input) input.indeterminate = visibleSelectedCount > 0 && !allVisibleSelected;
-                    }}
-                    onChange={toggleVisibleReports}
+                    checked={visibleSelectedCount > 0 && !allVisibleSelected ? "indeterminate" : allVisibleSelected}
+                    onCheckedChange={toggleVisibleReports}
                   />
-                </th>
-                <th>Report</th>
-                <th>Status</th>
-                {isAdmin ? <th>Reporter</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {paginatedReports.map((r) => (
-                <tr key={r.id}>
-                  <td className="select-cell" onClick={(event) => event.stopPropagation()}>
-                    <input
-                      type="checkbox"
+                </TableHead>
+                <TableHead>Report</TableHead>
+                <TableHead className={CX.statusCell}>Status</TableHead>
+                {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paginatedReports.map((r, index) => (
+                <TableRow key={r.id} className={cn(index % 2 === 1 && "bg-muted/40")}>
+                  <TableCell className={CX.selectCell} onClick={(event) => event.stopPropagation()}>
+                    <Checkbox
                       aria-label={`Select report ${r.title}`}
                       checked={selectedIds.has(r.id)}
-                      onChange={() => toggleReport(r.id)}
+                      onCheckedChange={() => toggleReport(r.id)}
                     />
-                  </td>
-                  <td className="report-cell">
-                    <div className="report-cell-layout">
-                      <div className="report-thumb">
+                  </TableCell>
+                  <TableCell>
+                    <div className={CX.reportLayout}>
+                      <div>
                         {thumbnailPreviews[r.id]?.isImage ? (
-                          <img className="thumb" src={thumbnailPreviews[r.id].url} alt="" />
+                          <img className={CX.thumb} src={thumbnailPreviews[r.id].url} alt="" />
                         ) : (
-                          <span className="thumb-placeholder">{r.screenshot_key ? (thumbnailPreviews[r.id] ? "File" : "Loading") : "No shot"}</span>
+                          <span className={CX.thumbPlaceholder}>{r.screenshot_key ? (thumbnailPreviews[r.id] ? "File" : "Loading") : "No shot"}</span>
                         )}
                       </div>
-                      <div className="report-copy">
-                        <button
-                          className="report-open"
+                      <div className="min-w-0">
+                        <Button
+                          className={CX.reportOpen}
+                          variant="link"
                           onClick={(event) => {
                             event.stopPropagation();
                             openReport(r.id);
                           }}
                         >
                           {r.title}
-                        </button>
+                        </Button>
                         {r.page_url ? (
                           <a
-                            className="report-url"
+                            className={CX.reportUrl}
                             href={r.page_url}
                             target="_blank"
                             rel="noreferrer"
@@ -553,40 +707,27 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                             {formatUrl(r.page_url)}
                           </a>
                         ) : null}
-                        <div className="report-meta">
+                        <div className={CX.reportMeta}>
                           <span>{r.project}</span>
                           {r.severity ? <span>{r.severity}</span> : null}
                           <span>{r.console_count}c / {r.network_count}n</span>
                           <span>{new Date(r.created_at).toLocaleDateString()}</span>
                         </div>
+                        <div className={CX.mobileFields}>
+                          {renderStatusControl(r)}
+                          {isAdmin ? <span className={CX.mobileReporter}>{r.reporter_email}</span> : null}
+                        </div>
                       </div>
                     </div>
-                  </td>
-                  <td>
-                    {isAdmin ? (
-                      <select
-                        className={`status-select ${r.status}`}
-                        value={r.status}
-                        disabled={updatingStatus === r.id}
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          void updateStatus(r, event.target.value);
-                        }}
-                      >
-                        {STATUSES.map((status) => (
-                          <option key={status} value={status}>{status.replace("_", " ")}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className={`badge ${r.status}`}>{r.status.replace("_", " ")}</span>
-                    )}
-                  </td>
-                  {isAdmin ? <td className="muted">{r.reporter_email}</td> : null}
-                </tr>
+                  </TableCell>
+                  <TableCell className={CX.statusCell}>
+                    {renderStatusControl(r)}
+                  </TableCell>
+                  {isAdmin ? <TableCell className={CX.reporterCell}>{r.reporter_email}</TableCell> : null}
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
       {paginationControls}
@@ -603,6 +744,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
           }}
         />
       ) : null}
-    </div>
+      </CardContent>
+    </Card>
   );
 }

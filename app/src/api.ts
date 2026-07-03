@@ -21,6 +21,12 @@ export interface ReportRow {
   console_count: number;
   network_count: number;
   screenshot_key: string | null;
+  updated_by_email: string | null;
+  updated_by_source: string | null;
+  fixed_at: string | null;
+  fixed_by_email: string | null;
+  fix_commit_sha: string | null;
+  fix_commit_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -32,12 +38,24 @@ export interface ReportDetail extends ReportRow {
   elements: string | null;          // json array of {selector,text,rect}
   screenshot_keys: string | null;   // json array of R2 keys
   resolution: string | null;
+  latest_fixed_event: ReportAuditEvent | null;
 }
 
 export interface ReportElement {
   selector: string;
   text: string;
   rect: { x: number; y: number; width: number; height: number } | null;
+}
+
+export interface ReportAuditEvent {
+  id: string;
+  report_id: string;
+  actor_email: string;
+  actor_source: string;
+  action: string;
+  before_json: string | null;
+  after_json: string | null;
+  created_at: string;
 }
 
 // Parse the elements JSON, falling back to the legacy single-element fields.
@@ -106,6 +124,62 @@ export interface ScreenshotPreview {
   isImage: boolean;
 }
 
+export interface AnalyticsBreakdownItem {
+  name: string;
+  count: number;
+}
+
+export interface AnalyticsTrendPoint {
+  date: string;
+  count: number;
+}
+
+export interface ProjectAnalytics {
+  project: string;
+  total: number;
+  open: number;
+  active: number;
+  done: number;
+  withLogs: number;
+  withScreenshots: number;
+  lastReportAt: string | null;
+  primaryDomain: string | null;
+  byStatus: AnalyticsBreakdownItem[];
+  bySeverity: AnalyticsBreakdownItem[];
+  byReporter: AnalyticsBreakdownItem[];
+  byDomain: AnalyticsBreakdownItem[];
+}
+
+export interface AnalyticsTotals {
+  reports: number;
+  projects: number;
+  open: number;
+  active: number;
+  done: number;
+  withLogs: number;
+  withScreenshots: number;
+  lastReportAt: string | null;
+}
+
+export interface ReportAnalytics {
+  period: {
+    days: number;
+    currentStart: string;
+    currentEnd: string;
+    previousStart: string;
+    previousEnd: string;
+  };
+  totals: AnalyticsTotals;
+  periodTotals: AnalyticsTotals;
+  previousPeriodTotals: AnalyticsTotals;
+  byStatus: AnalyticsBreakdownItem[];
+  bySeverity: AnalyticsBreakdownItem[];
+  byReporter: AnalyticsBreakdownItem[];
+  byDomain: AnalyticsBreakdownItem[];
+  recentTrend: AnalyticsTrendPoint[];
+  projects: ProjectAnalytics[];
+}
+
 async function authFetch(path: string, token: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
@@ -138,13 +212,39 @@ export async function getAccess(token: string): Promise<AccessInfo> {
 }
 
 export async function listReports(token: string): Promise<ReportRow[]> {
-  const data = await json<{ reports: ReportRow[] }>(await authFetch("/api/reports", token));
-  return data.reports;
+  const limit = 500;
+  const reports: ReportRow[] = [];
+  let offset = 0;
+  let total = Number.POSITIVE_INFINITY;
+
+  while (offset < total) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    const data = await json<{ reports: ReportRow[]; total?: number; limit?: number; offset?: number }>(
+      await authFetch(`/api/reports?${params.toString()}`, token),
+    );
+    reports.push(...data.reports);
+    total = data.total ?? reports.length;
+    const pageSize = data.limit ?? limit;
+    if (data.reports.length === 0 || pageSize <= 0) break;
+    offset += data.reports.length;
+  }
+
+  return reports;
+}
+
+export async function getReportAnalytics(token: string, days = 14): Promise<ReportAnalytics> {
+  const params = new URLSearchParams({ days: String(days) });
+  return json(await authFetch(`/api/reports/analytics?${params.toString()}`, token));
 }
 
 export async function getReport(token: string, id: string): Promise<ReportDetail> {
   const data = await json<{ report: ReportDetail }>(await authFetch(`/api/reports/${id}`, token));
   return data.report;
+}
+
+export async function getReportAuditLog(token: string, id: string): Promise<ReportAuditEvent[]> {
+  const data = await json<{ events: ReportAuditEvent[] }>(await authFetch(`/api/reports/${id}/audit`, token));
+  return data.events;
 }
 
 export async function getScreenshotPreview(token: string, id: string): Promise<ScreenshotPreview> {
@@ -183,6 +283,8 @@ export async function patchReport(
     page_url?: string | null;
     status?: string;
     resolution?: string | null;
+    fix_commit_sha?: string | null;
+    fix_commit_url?: string | null;
   },
 ): Promise<void> {
   await json(await authFetch(`/api/reports/${id}`, token, {

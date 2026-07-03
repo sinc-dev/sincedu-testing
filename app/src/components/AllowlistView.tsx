@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { addTester, listReports, listTesters, removeTester, type ReportRow, type TesterRow } from "../api";
+import { Alert, AlertDescription } from "./ui/alert";
+import { Avatar, AvatarFallback } from "./ui/avatar";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Input } from "./ui/input";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "./ui/sheet";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import { cn } from "src/lib/utils";
+import { STATUS_PILL_STYLES } from "src/lib/status";
 
 interface Props {
   getToken: () => Promise<string | null>;
@@ -106,128 +116,170 @@ export function AllowlistView({ getToken }: Props) {
   };
 
   return (
-    <div className="card">
-      <h3 style={{ marginTop: 0 }}>Tester allowlist</h3>
-      <p className="muted">Only these emails (plus admins) can sign in to the widget and file reports.</p>
-      {error ? <p style={{ color: "#dc2626" }}>{error}</p> : null}
-      {notice ? <p style={{ color: "#166534" }}>{notice}</p> : null}
+    <Card>
+      <CardHeader>
+        <CardTitle>Tester allowlist</CardTitle>
+        <CardDescription>Only these emails (plus admins) can sign in to the widget and file reports.</CardDescription>
+      </CardHeader>
+      <CardContent>
+      {error ? <Alert variant="destructive" className="mb-3"><AlertDescription>{error}</AlertDescription></Alert> : null}
+      {notice ? <Alert className="mb-3 border-primary/35 bg-primary/10 text-primary"><AlertDescription>{notice}</AlertDescription></Alert> : null}
 
-      <form onSubmit={add} style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-        <input className="input" type="email" required placeholder="tester@studyinnc.com" value={email} onChange={(e) => setEmail(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
-        <input className="input" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} style={{ flex: 1, minWidth: 160 }} />
-        <button className="btn" type="submit" disabled={busy}>{busy ? "Adding…" : "Add tester"}</button>
+      <form onSubmit={add} className="flex flex-wrap gap-2">
+        <Input className="min-w-[200px] flex-1" type="email" required placeholder="tester@studyinnc.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Input className="min-w-[160px] flex-1" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <Button type="submit" disabled={busy}>{busy ? "Adding…" : "Add tester"}</Button>
       </form>
 
       {loading ? (
-        <p className="muted">Loading…</p>
+        <p className="mt-4 text-muted-foreground">Loading…</p>
       ) : testers.length === 0 ? (
-        <p className="muted">No testers yet.</p>
+        <p className="mt-4 text-muted-foreground">No testers yet.</p>
       ) : (
-        <div className="table-scroll" aria-label="Tester allowlist table">
-          <table className="allowlist-table">
-            <thead>
-              <tr><th>Email</th><th>Note</th><th>Added</th><th></th></tr>
-            </thead>
-            <tbody>
+        <div className="mt-4" aria-label="Tester allowlist table">
+          <Table className="min-w-[920px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="min-w-[340px]">Email</TableHead>
+                <TableHead className="min-w-[320px]">Note</TableHead>
+                <TableHead className="min-w-[120px]">Added</TableHead>
+                <TableHead className="min-w-[140px]"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {testers.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    <button className="tester-person" type="button" onClick={() => setSelectedTester(t)}>
-                      <span className="tester-avatar" aria-hidden="true">{testerInitial(t.email)}</span>
+                <TableRow key={t.id}>
+                  <TableCell>
+                    <Button
+                      className="inline-flex h-auto items-center gap-2.5 p-0 text-left text-foreground hover:bg-transparent hover:text-primary"
+                      variant="ghost"
+                      type="button"
+                      onClick={() => setSelectedTester(t)}
+                    >
+                      <Avatar className="h-8 w-8">
+                        <AvatarFallback className="bg-primary text-primary-foreground text-xs font-bold">
+                          {testerInitial(t.email)}
+                        </AvatarFallback>
+                      </Avatar>
                       <span>{t.email}</span>
-                    </button>
-                  </td>
-                  <td className="muted">{t.note || "—"}</td>
-                  <td className="muted">{new Date(t.created_at).toLocaleDateString()}</td>
-                  <td style={{ textAlign: "right" }}>
-                    <button className="btn danger" type="button" onClick={() => remove(t.id)}>Remove</button>
-                  </td>
-                </tr>
+                    </Button>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{t.note || "—"}</TableCell>
+                  <TableCell className="text-muted-foreground">{new Date(t.created_at).toLocaleDateString()}</TableCell>
+                  <TableCell className="text-right">
+                    <Button variant="destructive" type="button" onClick={() => remove(t.id)}>Remove</Button>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
 
       {selectedTester ? (
-        <div className="overlay" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setSelectedTester(null);
+        <Sheet open onOpenChange={(open) => {
+          if (!open) setSelectedTester(null);
         }}>
-          <aside className="drawer tester-drawer" aria-label={`${selectedTester.email} tester stats`}>
-            <div className="drawer-scroll">
-              <div className="drawer-header tester-drawer-header">
-                <div className="tester-drawer-title">
-                  <span className="tester-avatar large" aria-hidden="true">{testerInitial(selectedTester.email)}</span>
+          <SheetContent className="w-full overflow-y-auto sm:max-w-[560px]">
+            <SheetHeader className="mb-4 text-left">
+              <SheetTitle>
+                <div className="flex min-w-0 items-start gap-3.5 min-[821px]:items-center">
+                  <Avatar className="h-12 w-12">
+                    <AvatarFallback className="bg-primary text-primary-foreground text-lg font-bold">
+                      {testerInitial(selectedTester.email)}
+                    </AvatarFallback>
+                  </Avatar>
                   <div>
-                    <h2>{selectedTester.email}</h2>
-                    <p className="muted">Added {new Date(selectedTester.created_at).toLocaleDateString()}</p>
+                    <span className="[overflow-wrap:anywhere]">{selectedTester.email}</span>
+                    <p className="text-muted-foreground">Added {new Date(selectedTester.created_at).toLocaleDateString()}</p>
                   </div>
                 </div>
-                <button className="icon-btn drawer-close" type="button" aria-label="Close tester drawer" onClick={() => setSelectedTester(null)}>
-                  ×
-                </button>
+              </SheetTitle>
+            </SheetHeader>
+
+              <div className="mb-3.5 grid grid-cols-1 gap-2.5 min-[821px]:grid-cols-2">
+                {([
+                  { label: "Total", value: selectedStats.total, tone: "" },
+                  { label: "Open", value: selectedStats.open, tone: "text-destructive" },
+                  { label: "In progress", value: selectedStats.active, tone: "text-[oklch(0.45_0.12_70)]" },
+                  { label: "Done", value: selectedStats.done, tone: "text-primary" },
+                ] as const).map((stat) => (
+                  <Card key={stat.label}>
+                    <CardContent className="grid gap-1.5 p-3">
+                      <span className="text-xs font-semibold text-muted-foreground">{stat.label}</span>
+                      <strong className={cn("text-2xl leading-none", stat.tone)}>{stat.value}</strong>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
 
-              <div className="tester-stat-grid">
-                <div className="tester-stat"><span>Total</span><strong>{selectedStats.total}</strong></div>
-                <div className="tester-stat open"><span>Open</span><strong>{selectedStats.open}</strong></div>
-                <div className="tester-stat active"><span>In progress</span><strong>{selectedStats.active}</strong></div>
-                <div className="tester-stat done"><span>Done</span><strong>{selectedStats.done}</strong></div>
-              </div>
-
-              <div className="card tester-drawer-card">
-                <strong>Status split</strong>
-                <div className="tester-split">
-                  <span style={{ flexGrow: selectedStats.open }} className="open" title={`${selectedStats.open} open`} />
-                  <span style={{ flexGrow: selectedStats.active }} className="active" title={`${selectedStats.active} in progress`} />
-                  <span style={{ flexGrow: selectedStats.done }} className="done" title={`${selectedStats.done} done`} />
+              <Card className="mb-3">
+                <CardHeader><CardTitle className="text-sm">Status split</CardTitle></CardHeader>
+                <CardContent>
+                <div className="flex h-3 min-w-0 gap-1.5 overflow-hidden rounded-full bg-muted/50">
+                  <span style={{ flexGrow: selectedStats.open }} className="min-w-0 rounded-full bg-destructive/30" title={`${selectedStats.open} open`} />
+                  <span style={{ flexGrow: selectedStats.active }} className="min-w-0 rounded-full bg-warning/35" title={`${selectedStats.active} in progress`} />
+                  <span style={{ flexGrow: selectedStats.done }} className="min-w-0 rounded-full bg-primary/30" title={`${selectedStats.done} done`} />
                 </div>
-                <div className="tester-split-legend">
-                  <span><i className="open" /> Open</span>
-                  <span><i className="active" /> In progress</span>
-                  <span><i className="done" /> Done</span>
+                <div className="mt-2.5 flex flex-wrap gap-x-3.5 gap-y-2 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-full bg-destructive/30" /> Open</span>
+                  <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-full bg-warning/35" /> In progress</span>
+                  <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-full bg-primary/30" /> Done</span>
                 </div>
-              </div>
+                </CardContent>
+              </Card>
 
-              <div className="card tester-drawer-card">
-                <strong>Projects</strong>
+              <Card className="mb-3">
+                <CardHeader><CardTitle className="text-sm">Projects</CardTitle></CardHeader>
+                <CardContent>
                 {selectedStats.projects.length === 0 ? (
-                  <p className="muted">No submissions yet.</p>
+                  <p className="text-muted-foreground">No submissions yet.</p>
                 ) : (
-                  <div className="tester-projects">
+                  <div className="grid gap-2">
                     {selectedStats.projects.map(([project, count]) => (
-                      <div key={project}>
-                        <span>{project}</span>
+                      <div
+                        key={project}
+                        className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 border-t border-border py-2.5 first:border-t-0 first:pt-0"
+                      >
+                        <span className="text-muted-foreground">{project}</span>
                         <strong>{count}</strong>
                       </div>
                     ))}
                   </div>
                 )}
-              </div>
+                </CardContent>
+              </Card>
 
-              <div className="card tester-drawer-card">
-                <strong>Recent submissions</strong>
+              <Card className="mb-3">
+                <CardHeader><CardTitle className="text-sm">Recent submissions</CardTitle></CardHeader>
+                <CardContent>
                 {selectedReports.length === 0 ? (
-                  <p className="muted">No reports submitted by this tester.</p>
+                  <p className="text-muted-foreground">No reports submitted by this tester.</p>
                 ) : (
-                  <div className="tester-recent-list">
+                  <div className="grid gap-2">
                     {selectedReports.slice(0, 8).map((report) => (
-                      <div className="tester-recent-item" key={report.id}>
-                        <span className={`badge ${report.status}`}>{report.status.replace("_", " ")}</span>
+                      <div
+                        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-2 border-t border-border py-2.5 first:border-t-0 first:pt-0"
+                        key={report.id}
+                      >
+                        <Badge variant="outline" className={cn("rounded-full capitalize", STATUS_PILL_STYLES[report.status])}>
+                          {report.status.replace("_", " ")}
+                        </Badge>
                         <div>
                           <strong>{report.title}</strong>
-                          <p>{report.project} · {new Date(report.created_at).toLocaleDateString()}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">{report.project} · {new Date(report.created_at).toLocaleDateString()}</p>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
-              </div>
-            </div>
-          </aside>
-        </div>
+                </CardContent>
+              </Card>
+          </SheetContent>
+        </Sheet>
       ) : null}
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 

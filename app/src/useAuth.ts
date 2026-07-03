@@ -15,6 +15,20 @@ export function useAuth() {
 
   useEffect(() => {
     let active = true;
+    const readyFallback = window.setTimeout(() => {
+      if (!active) return;
+      setReady(true);
+      setError((current) => current || "Authentication is taking longer than expected. You can retry sign-in or refresh the page.");
+    }, 4000);
+
+    if (!hasSupabaseConfig) {
+      window.clearTimeout(readyFallback);
+      setError("Missing Supabase config. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.");
+      setReady(true);
+      return () => {
+        active = false;
+      };
+    }
 
     void completeOAuthRedirect()
       .then(() => supabase.auth.getSession())
@@ -28,7 +42,10 @@ export function useAuth() {
         setError(err instanceof Error ? err.message : "Unable to check sign-in");
       })
       .finally(() => {
-        if (active) setReady(true);
+        if (active) {
+          window.clearTimeout(readyFallback);
+          setReady(true);
+        }
       });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -40,6 +57,7 @@ export function useAuth() {
 
     return () => {
       active = false;
+      window.clearTimeout(readyFallback);
       listener.subscription.unsubscribe();
     };
   }, []);

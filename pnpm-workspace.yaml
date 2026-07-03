@@ -2,3 +2,7 @@ packages:
   - "worker"
   - "widget"
   - "app"
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

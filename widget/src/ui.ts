@@ -1,3 +1,5 @@
+import type { ReportSummary } from "./api.js";
+
 const Z = 2147483630;
 const IGNORE_ATTR = "data-sincedu-tester-ignore";
 
@@ -9,17 +11,69 @@ const STYLES = `
   .corner.bottom-left { left: 20px; bottom: 20px; }
   .corner.top-right { right: 20px; top: 20px; }
   .corner.top-left { left: 20px; top: 20px; }
-  .launcher-wrap { position: relative; display: inline-flex; }
+  .launcher-wrap { position: relative; display: inline-block; width: 88px; height: 88px; }
+  .launcher-core { position: absolute; inset: 0; }
+  .menu-ring {
+    position: absolute; left: 5px; top: 5px; width: 78px; height: 78px; border-radius: 9999px;
+    appearance: none; -webkit-appearance: none; padding: 0;
+    border: none; outline: none; box-shadow: none; background: transparent; color: #6b7280; cursor: pointer;
+    opacity: .98;
+  }
+  .menu-ring:focus-visible { outline: 3px solid rgba(46,125,70,.35); outline-offset: 2px; }
+  .menu-ring-dot {
+    position: absolute; width: 4px; height: 4px; border-radius: 9999px; pointer-events: none;
+    background: #9ca3af; box-shadow: 0 1px 2px rgba(0,0,0,.16), 0 0 0 1px rgba(255,255,255,.9);
+    opacity: 0;
+    transform: translate(13px, 13px) scale(.55);
+    transition: opacity 150ms ease, transform 190ms cubic-bezier(.16, 1, .3, 1), background 120ms ease;
+  }
+  .launcher-core:hover .menu-ring-dot,
+  .launcher-core:focus-within .menu-ring-dot,
+  .launcher-wrap.open .menu-ring-dot {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  .launcher-core:hover .menu-ring-dot, .launcher-wrap.open .menu-ring-dot { background: #6b7280; }
+  .menu-ring-dot.one { left: 25px; top: 29px; }
+  .menu-ring-dot.two { left: 31px; top: 24px; }
+  .menu-ring-dot.three { left: 38px; top: 20px; }
   .launcher {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 44px; height: 44px; border-radius: 9999px; border: none; cursor: pointer;
-    background: #2e7d46; color: #fff; box-shadow: 0 6px 16px rgba(0,0,0,.25);
+    position: absolute; left: 29px; top: 29px; display: inline-flex; align-items: center; justify-content: center;
+    width: 54px; height: 54px; border-radius: 9999px; border: 2px solid rgba(255,255,255,.95); cursor: pointer;
+    background: #2e7d46; color: #fff; box-shadow: 0 8px 20px rgba(0,0,0,.28);
     touch-action: none;
   }
   .launcher:hover { background: #256b3b; }
   .launcher.active { background: #1b5e2c; box-shadow: 0 0 0 3px rgba(46,125,70,.35); }
-  .launcher svg { width: 22px; height: 22px; }
+  .launcher svg { width: 26px; height: 26px; }
   .corner.dragging .launcher { cursor: grabbing; }
+  .orbit {
+    position: absolute; left: 27px; top: 27px; width: 36px; height: 36px;
+    opacity: 0; pointer-events: none; transform: translate(0, 0) scale(.78);
+    transition: opacity 120ms ease, transform 160ms ease;
+  }
+  .launcher-wrap.open .orbit { opacity: 1; pointer-events: auto; transform: translate(var(--orbit-x), var(--orbit-y)) scale(1); }
+  .orbit-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; border-radius: 9999px; border: 1px solid rgba(255,255,255,.9);
+    background: #fff; color: #1f2937; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,.2);
+  }
+  .orbit-btn svg { width: 18px; height: 18px; }
+  .orbit-btn:hover:not(:disabled) { color: #2e7d46; border-color: #2e7d46; }
+  .orbit-btn.active { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
+  .orbit-btn.loading { color: #6b7280; cursor: progress; }
+  .orbit-btn.error { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
+  .orbit-btn:disabled { opacity: .55; cursor: default; }
+  .orbit-label {
+    position: absolute; right: calc(100% + 8px); top: 50%; transform: translate(4px, -50%) scale(.96);
+    max-width: 180px; padding: 5px 8px; border-radius: 9999px; background: #111827; color: #fff;
+    font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; pointer-events: none;
+    opacity: 0; box-shadow: 0 4px 12px rgba(0,0,0,.22);
+    transition: opacity 120ms ease, transform 140ms ease;
+  }
+  .orbit:hover .orbit-label, .orbit:focus-within .orbit-label {
+    opacity: 1; transform: translate(0, -50%) scale(1);
+  }
   .badge-count {
     position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px;
     display: flex; align-items: center; justify-content: center; border-radius: 9999px;
@@ -82,9 +136,37 @@ const STYLES = `
   .lightbox { position: fixed; inset: 0; z-index: ${Z + 5}; display: flex; align-items: center; justify-content: center;
     background: rgba(0,0,0,.85); padding: 40px; cursor: zoom-out; }
   .lightbox img { max-height: 100%; max-width: 100%; border-radius: 6px; background: #fff; box-shadow: 0 12px 32px rgba(0,0,0,.5); }
+  .reports-backdrop { position: fixed; inset: 0; z-index: ${Z + 5}; background: rgba(17,24,39,.18); opacity: 0; transition: opacity 140ms ease; }
+  .reports-backdrop.open { opacity: 1; }
+  .reports-drawer {
+    position: fixed; z-index: ${Z + 6}; top: 0; right: 0; width: min(390px, calc(100vw - 24px)); height: 100dvh;
+    display: grid; grid-template-rows: auto minmax(0, 1fr); background: #fff; color: #111827;
+    border-left: 1px solid #e5e7eb; box-shadow: -18px 0 42px rgba(0,0,0,.22);
+    transform: translateX(102%); transition: transform 180ms cubic-bezier(.16, 1, .3, 1);
+  }
+  .reports-drawer.open { transform: translateX(0); }
+  .reports-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px; border-bottom: 1px solid #e5e7eb; }
+  .reports-title { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+  .reports-subtitle { margin: 4px 0 0; color: #6b7280; font-size: 12px; line-height: 1.35; }
+  .reports-close { width: 30px; height: 30px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; color: #6b7280; cursor: pointer; font-size: 18px; line-height: 1; }
+  .reports-close:hover { color: #111827; border-color: #9ca3af; }
+  .reports-body { min-height: 0; overflow: auto; padding: 12px; }
+  .reports-state { margin: 0; padding: 18px 8px; color: #6b7280; font-size: 13px; line-height: 1.45; text-align: center; }
+  .report-list { display: grid; gap: 8px; }
+  .report-item { display: grid; gap: 7px; padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
+  .report-item-title { margin: 0; color: #111827; font-size: 13px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+  .report-item-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: #6b7280; font-size: 11px; }
+  .report-status { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 9999px; background: #f3f4f6; color: #374151; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+  .report-status.open { background: #fef2f2; color: #b91c1c; }
+  .report-status.fixed, .report-status.resolved, .report-status.closed { background: #ecfdf5; color: #047857; }
+  .report-status.investigating, .report-status.in_progress { background: #fffbeb; color: #b45309; }
+  .report-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #6b7280; font-size: 11px; }
 `;
 
 const CROSSHAIR_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>`;
+const LIST_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>`;
+const HIGHLIGHT_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v4h4l6-6"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0L7.4 9.4a2 2 0 0 1 0-2.8L12 2l10 10Z"/></svg>`;
+const SIGN_OUT_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>`;
 const MIC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 const MIC_OFF_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 const CAMERA_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3"/></svg>`;
@@ -137,6 +219,13 @@ function sanitizePlainText(value: string): string {
 export interface CaptureView {
   selector: string;
   screenshotUrl: string | null;
+}
+
+export interface ReportsDrawerController {
+  setLoading: () => void;
+  setReports: (reports: ReportSummary[]) => void;
+  setError: (message: string) => void;
+  close: () => void;
 }
 
 export interface CaptureCardOptions {
@@ -266,6 +355,8 @@ export class WidgetUI {
   private root: ShadowRoot;
   private launcherButton: HTMLButtonElement | null = null;
   private launcherWrap: HTMLElement | null = null;
+  private highlightButton: HTMLButtonElement | null = null;
+  private orbitOpen = false;
 
   constructor() {
     const host = document.createElement("div");
@@ -282,11 +373,40 @@ export class WidgetUI {
     position: string;
     onClick: () => void;
     onContextMenu: (pointer: { x: number; y: number }) => void;
+    onOpenReports: () => void;
+    onToggleHighlights: () => void;
+    onCaptureViewport: () => void;
+    onSignOut: () => void;
   }): void {
     const wrap = document.createElement("span");
     wrap.setAttribute(IGNORE_ATTR, "true");
     wrap.className = "launcher-wrap";
     installWidgetEventBoundary(wrap);
+
+    const core = document.createElement("span");
+    core.setAttribute(IGNORE_ATTR, "true");
+    core.className = "launcher-core";
+
+    const menuButton = document.createElement("button");
+    menuButton.setAttribute(IGNORE_ATTR, "true");
+    menuButton.className = "menu-ring";
+    menuButton.type = "button";
+    menuButton.title = "Open testing widget menu";
+    menuButton.setAttribute("aria-label", "Open testing widget menu");
+    menuButton.setAttribute("aria-expanded", "false");
+    menuButton.innerHTML = `
+      <span class="menu-ring-dot one"></span>
+      <span class="menu-ring-dot two"></span>
+      <span class="menu-ring-dot three"></span>
+    `;
+    const setOrbitOpen = (open: boolean) => {
+      this.orbitOpen = open;
+      wrap.classList.toggle("open", open);
+      menuButton.setAttribute("aria-expanded", String(open));
+    };
+    menuButton.addEventListener("click", () => {
+      setOrbitOpen(!this.orbitOpen);
+    });
 
     const button = document.createElement("button");
     button.setAttribute(IGNORE_ATTR, "true");
@@ -296,12 +416,117 @@ export class WidgetUI {
     button.innerHTML = CROSSHAIR_SVG;
     this.launcherButton = button;
     this.launcherWrap = wrap;
-    button.addEventListener("click", opts.onClick);
+    let longPressTimer: number | null = null;
+    let suppressPickerClick = false;
+    const clearLongPress = () => {
+      if (longPressTimer !== null) window.clearTimeout(longPressTimer);
+      longPressTimer = null;
+    };
+    button.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse") return;
+      clearLongPress();
+      longPressTimer = window.setTimeout(() => {
+        suppressPickerClick = true;
+        setOrbitOpen(true);
+      }, 450);
+    });
+    button.addEventListener("pointermove", clearLongPress);
+    button.addEventListener("pointerup", clearLongPress);
+    button.addEventListener("pointercancel", clearLongPress);
+    button.addEventListener("click", (event) => {
+      if (suppressPickerClick) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressPickerClick = false;
+        return;
+      }
+      opts.onClick();
+    });
     button.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       opts.onContextMenu({ x: e.clientX, y: e.clientY });
     });
-    wrap.appendChild(button);
+
+    const makeOrbitButton = (
+      className: string,
+      label: string,
+      title: string,
+      icon: string,
+      offset: { x: number; y: number },
+      onClick: () => void,
+    ) => {
+      const slot = document.createElement("span");
+      slot.setAttribute(IGNORE_ATTR, "true");
+      slot.className = "orbit";
+      slot.style.setProperty("--orbit-x", `${offset.x}px`);
+      slot.style.setProperty("--orbit-y", `${offset.y}px`);
+      const action = document.createElement("button");
+      action.setAttribute(IGNORE_ATTR, "true");
+      action.className = `orbit-btn ${className}`;
+      action.type = "button";
+      action.title = title;
+      action.setAttribute("aria-label", label);
+      action.innerHTML = icon;
+      action.addEventListener("click", () => {
+        onClick();
+        setOrbitOpen(false);
+        wrap.classList.remove("open");
+        menuButton.setAttribute("aria-expanded", "false");
+      });
+      slot.appendChild(action);
+      const text = document.createElement("span");
+      text.setAttribute(IGNORE_ATTR, "true");
+      text.className = "orbit-label";
+      text.textContent = label;
+      slot.appendChild(text);
+      return { slot, action };
+    };
+
+    const viewport = makeOrbitButton(
+      "viewport-action",
+      "Capture viewport screenshot",
+      "Capture viewport screenshot",
+      CAMERA_SVG,
+      { x: -10, y: -58 },
+      opts.onCaptureViewport,
+    );
+
+    const reports = makeOrbitButton(
+      "reports-action",
+      "View my submitted bug reports",
+      "View my submitted bug reports",
+      LIST_SVG,
+      { x: -52, y: -34 },
+      opts.onOpenReports,
+    );
+
+    const highlight = makeOrbitButton(
+      "highlight-action",
+      "Highlight reported elements on this page",
+      "Highlight elements I reported on this page",
+      HIGHLIGHT_SVG,
+      { x: -62, y: 16 },
+      opts.onToggleHighlights,
+    );
+    highlight.action.setAttribute("aria-pressed", "false");
+    this.highlightButton = highlight.action;
+
+    const signOut = makeOrbitButton(
+      "signout-action",
+      "Sign out of testing widget",
+      "Sign out",
+      SIGN_OUT_SVG,
+      { x: -22, y: 50 },
+      opts.onSignOut,
+    );
+
+    core.appendChild(menuButton);
+    core.appendChild(button);
+    wrap.appendChild(core);
+    wrap.appendChild(viewport.slot);
+    wrap.appendChild(reports.slot);
+    wrap.appendChild(highlight.slot);
+    wrap.appendChild(signOut.slot);
 
     const hostEl = opts.mount ? document.querySelector(opts.mount) : null;
     if (hostEl) {
@@ -337,6 +562,29 @@ export class WidgetUI {
       this.launcherButton.title = active
         ? "Picker on — click an element, or Esc to cancel (⌥K)"
         : "Tester capture — pick an element & report (⌥K)";
+    }
+  }
+
+  setHighlightControlState(state: { active?: boolean; loading?: boolean; error?: boolean; count?: number }): void {
+    const button = this.highlightButton;
+    if (!button) return;
+    const active = Boolean(state.active);
+    const loading = Boolean(state.loading);
+    const error = Boolean(state.error);
+    button.classList.toggle("active", active);
+    button.classList.toggle("loading", loading);
+    button.classList.toggle("error", error);
+    button.disabled = loading;
+    button.setAttribute("aria-pressed", String(active));
+    if (loading) {
+      button.title = "Loading your reported elements";
+    } else if (error) {
+      button.title = "Could not load reported elements";
+    } else if (active) {
+      const count = state.count ?? 0;
+      button.title = count === 1 ? "1 reported element highlighted" : `${count} reported elements highlighted`;
+    } else {
+      button.title = "Highlight elements I reported on this page";
     }
   }
 
@@ -388,6 +636,119 @@ export class WidgetUI {
     box.addEventListener("click", dismiss);
     document.addEventListener("keydown", onKey, true);
     this.root.appendChild(box);
+  }
+
+  showReportsDrawer(): ReportsDrawerController {
+    this.root.querySelector(".reports-backdrop")?.remove();
+    this.root.querySelector(".reports-drawer")?.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.setAttribute(IGNORE_ATTR, "true");
+    backdrop.className = "reports-backdrop";
+
+    const drawer = document.createElement("aside");
+    drawer.setAttribute(IGNORE_ATTR, "true");
+    drawer.className = "reports-drawer";
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.setAttribute("aria-labelledby", "sincedu-reports-title");
+    drawer.innerHTML = `
+      <div class="reports-head">
+        <div>
+          <h2 id="sincedu-reports-title" class="reports-title">My reports</h2>
+          <p class="reports-subtitle">Reports submitted from your tester account.</p>
+        </div>
+        <button class="reports-close" type="button" aria-label="Close reports drawer">×</button>
+      </div>
+      <div class="reports-body"><p class="reports-state">Loading reports…</p></div>
+    `;
+
+    const body = drawer.querySelector(".reports-body") as HTMLDivElement;
+    const close = () => {
+      backdrop.classList.remove("open");
+      drawer.classList.remove("open");
+      window.setTimeout(() => {
+        backdrop.remove();
+        drawer.remove();
+      }, 180);
+      document.removeEventListener("keydown", onKey, true);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    const setState = (message: string) => {
+      body.replaceChildren();
+      const state = document.createElement("p");
+      state.className = "reports-state";
+      state.textContent = message;
+      body.appendChild(state);
+    };
+    const formatDate = (value: string): string => {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    };
+    const pageLabel = (value: string | null): string => {
+      if (!value) return "No page URL";
+      try {
+        const url = new URL(value);
+        return `${url.hostname}${url.pathname}`;
+      } catch {
+        return value;
+      }
+    };
+
+    drawer.querySelector(".reports-close")?.addEventListener("click", close);
+    backdrop.addEventListener("click", close);
+    document.addEventListener("keydown", onKey, true);
+    this.root.appendChild(backdrop);
+    this.root.appendChild(drawer);
+    requestAnimationFrame(() => {
+      backdrop.classList.add("open");
+      drawer.classList.add("open");
+    });
+
+    return {
+      setLoading: () => setState("Loading reports…"),
+      setError: (message) => setState(message),
+      setReports: (reports) => {
+        body.replaceChildren();
+        if (reports.length === 0) {
+          setState("No reports found for this account.");
+          return;
+        }
+        const list = document.createElement("div");
+        list.className = "report-list";
+        for (const report of reports) {
+          const item = document.createElement("article");
+          item.className = "report-item";
+
+          const title = document.createElement("p");
+          title.className = "report-item-title";
+          title.textContent = report.title || report.element_selector || "Untitled report";
+
+          const meta = document.createElement("div");
+          meta.className = "report-item-meta";
+          const status = document.createElement("span");
+          status.className = `report-status ${report.status || "open"}`;
+          status.textContent = (report.status || "open").replace("_", " ");
+          const project = document.createElement("span");
+          project.textContent = report.project || "default";
+          const date = document.createElement("span");
+          date.textContent = formatDate(report.created_at);
+          meta.append(status, project, date);
+
+          const url = document.createElement("div");
+          url.className = "report-url";
+          url.textContent = pageLabel(report.page_url);
+
+          item.append(title, meta, url);
+          list.appendChild(item);
+        }
+        body.appendChild(list);
+      },
+      close,
+    };
   }
 
   // The multi-capture note card. The captures row updates independently of the
