@@ -20,19 +20,118 @@ export interface ReportSummary {
   project: string | null;
   reporter_email: string | null;
   title: string;
+  note?: string | null;
   status: string;
   page_url: string | null;
   element_selector: string | null;
+  screenshot_key?: string | null;
+  screenshot_keys?: string | null;
   created_at: string;
 }
 
-export async function listReports(apiBase: string, token: string): Promise<ReportSummary[]> {
-  const res = await fetch(`${apiBase}/api/reports`, {
+export interface ReportComment {
+  id: string;
+  report_id: string;
+  author_email: string;
+  body: string;
+  created_at: string;
+}
+
+export interface ListReportsOptions {
+  project?: string;
+  pageUrl?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listReports(
+  apiBase: string,
+  token: string,
+  options: ListReportsOptions = {},
+): Promise<ReportSummary[]> {
+  const params = new URLSearchParams();
+  if (options.project) params.set("project", options.project);
+  if (options.pageUrl) params.set("pageUrl", options.pageUrl);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.offset) params.set("offset", String(options.offset));
+  const qs = params.toString();
+  const res = await fetch(`${apiBase}/api/reports${qs ? `?${qs}` : ""}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(`reports load failed (${res.status})`);
   const data = await res.json() as { reports?: ReportSummary[] };
   return Array.isArray(data.reports) ? data.reports : [];
+}
+
+export function reportScreenshotCount(report: Pick<ReportSummary, "screenshot_key" | "screenshot_keys">): number {
+  if (report.screenshot_keys) {
+    try {
+      const parsed = JSON.parse(report.screenshot_keys);
+      if (Array.isArray(parsed)) {
+        const count = parsed.filter((key) => typeof key === "string" && key.length > 0).length;
+        if (count > 0) return count;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return report.screenshot_key ? 1 : 0;
+}
+
+export async function fetchReportScreenshot(apiBase: string, token: string, id: string, index: number): Promise<Blob> {
+  const res = await fetch(`${apiBase}/api/reports/${encodeURIComponent(id)}/screenshot/${index}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`screenshot load failed (${res.status})`);
+  return res.blob();
+}
+
+export async function listReportComments(apiBase: string, token: string, id: string): Promise<ReportComment[]> {
+  const res = await fetch(`${apiBase}/api/reports/${encodeURIComponent(id)}/comments`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`comments load failed (${res.status})`);
+  const data = await res.json() as { comments?: ReportComment[] };
+  return Array.isArray(data.comments) ? data.comments : [];
+}
+
+export async function addReportComment(apiBase: string, token: string, id: string, body: string): Promise<ReportComment> {
+  const res = await fetch(`${apiBase}/api/reports/${encodeURIComponent(id)}/comments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ body }),
+  });
+  if (!res.ok) throw new Error(`comment save failed (${res.status})`);
+  const data = await res.json() as { comment?: ReportComment };
+  if (!data.comment) throw new Error("comment save failed");
+  return data.comment;
+}
+
+export async function updateReportStatus(apiBase: string, token: string, id: string, status: string): Promise<void> {
+  const res = await fetch(`${apiBase}/api/reports/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) throw new Error(`stage update failed (${res.status})`);
+}
+
+function currentReportPageUrl(): string {
+  try {
+    const url = new URL(window.location.href);
+    if (url.pathname.endsWith("/widget-preview-host.html")) {
+      url.searchParams.delete("script");
+    }
+    return `${url.origin}${url.pathname}${url.search}`;
+  } catch {
+    return window.location.href;
+  }
 }
 
 export interface ReportElement {
@@ -65,7 +164,7 @@ export async function submitReport(input: SubmitInput): Promise<{ id: string }> 
     JSON.stringify({
       note,
       severity,
-      pageUrl: window.location.href,
+      pageUrl: currentReportPageUrl(),
       userAgent: navigator.userAgent,
       // Legacy single-element fields mirror the primary pick for back-compat.
       elementSelector: primary?.selector,
@@ -132,7 +231,7 @@ export async function submitReportLocal(
       project,
       note,
       severity,
-      pageUrl: window.location.href,
+      pageUrl: currentReportPageUrl(),
       userAgent: navigator.userAgent,
       elementSelector: primary?.selector,
       elementText: primary?.text,

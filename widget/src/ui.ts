@@ -14,7 +14,7 @@ const STYLES = `
   .launcher-wrap { position: relative; display: inline-block; width: 88px; height: 88px; }
   .launcher-core { position: absolute; inset: 0; }
   .menu-ring {
-    position: absolute; left: 5px; top: 5px; width: 78px; height: 78px; border-radius: 9999px;
+    position: absolute; left: -24px; top: -24px; width: 136px; height: 136px; border-radius: 9999px;
     appearance: none; -webkit-appearance: none; padding: 0;
     border: none; outline: none; box-shadow: none; background: transparent; color: #6b7280; cursor: pointer;
     opacity: .98;
@@ -23,20 +23,19 @@ const STYLES = `
   .menu-ring-dot {
     position: absolute; width: 4px; height: 4px; border-radius: 9999px; pointer-events: none;
     background: #9ca3af; box-shadow: 0 1px 2px rgba(0,0,0,.16), 0 0 0 1px rgba(255,255,255,.9);
-    opacity: 0;
-    transform: translate(13px, 13px) scale(.55);
+    opacity: .85;
+    transform: translate(0, 0) scale(1);
     transition: opacity 150ms ease, transform 190ms cubic-bezier(.16, 1, .3, 1), background 120ms ease;
   }
   .launcher-core:hover .menu-ring-dot,
   .launcher-core:focus-within .menu-ring-dot,
   .launcher-wrap.open .menu-ring-dot {
     opacity: 1;
-    transform: translate(0, 0) scale(1);
   }
   .launcher-core:hover .menu-ring-dot, .launcher-wrap.open .menu-ring-dot { background: #6b7280; }
-  .menu-ring-dot.one { left: 25px; top: 29px; }
-  .menu-ring-dot.two { left: 31px; top: 24px; }
-  .menu-ring-dot.three { left: 38px; top: 20px; }
+  .menu-ring-dot.one { left: 54px; top: 58px; }
+  .menu-ring-dot.two { left: 60px; top: 53px; }
+  .menu-ring-dot.three { left: 67px; top: 49px; }
   .launcher {
     position: absolute; left: 29px; top: 29px; display: inline-flex; align-items: center; justify-content: center;
     width: 54px; height: 54px; border-radius: 9999px; border: 2px solid rgba(255,255,255,.95); cursor: pointer;
@@ -52,7 +51,11 @@ const STYLES = `
     opacity: 0; pointer-events: none; transform: translate(0, 0) scale(.78);
     transition: opacity 120ms ease, transform 160ms ease;
   }
-  .launcher-wrap.open .orbit { opacity: 1; pointer-events: auto; transform: translate(var(--orbit-x), var(--orbit-y)) scale(1); }
+  .launcher-wrap:hover .orbit,
+  .launcher-wrap:focus-within .orbit,
+  .launcher-wrap.open .orbit {
+    opacity: 1; pointer-events: auto; transform: translate(var(--orbit-x), var(--orbit-y)) scale(1);
+  }
   .orbit-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 36px; height: 36px; border-radius: 9999px; border: 1px solid rgba(255,255,255,.9);
@@ -391,7 +394,6 @@ export class WidgetUI {
     menuButton.setAttribute(IGNORE_ATTR, "true");
     menuButton.className = "menu-ring";
     menuButton.type = "button";
-    menuButton.title = "Open testing widget menu";
     menuButton.setAttribute("aria-label", "Open testing widget menu");
     menuButton.setAttribute("aria-expanded", "false");
     menuButton.innerHTML = `
@@ -411,8 +413,7 @@ export class WidgetUI {
     const button = document.createElement("button");
     button.setAttribute(IGNORE_ATTR, "true");
     button.className = "launcher";
-    button.title = "Tester capture — pick an element & report (⌥K)";
-    button.setAttribute("aria-label", "Tester capture");
+    button.setAttribute("aria-label", "Tester capture — pick an element and report");
     button.innerHTML = CROSSHAIR_SVG;
     this.launcherButton = button;
     this.launcherWrap = wrap;
@@ -464,8 +465,7 @@ export class WidgetUI {
       action.setAttribute(IGNORE_ATTR, "true");
       action.className = `orbit-btn ${className}`;
       action.type = "button";
-      action.title = title;
-      action.setAttribute("aria-label", label);
+      action.setAttribute("aria-label", title || label);
       action.innerHTML = icon;
       action.addEventListener("click", () => {
         onClick();
@@ -559,9 +559,10 @@ export class WidgetUI {
   setLauncherActive(active: boolean): void {
     this.launcherButton?.classList.toggle("active", active);
     if (this.launcherButton) {
-      this.launcherButton.title = active
-        ? "Picker on — click an element, or Esc to cancel (⌥K)"
-        : "Tester capture — pick an element & report (⌥K)";
+      this.launcherButton.setAttribute(
+        "aria-label",
+        active ? "Picker on — click an element, or press Escape to cancel" : "Tester capture — pick an element and report",
+      );
     }
   }
 
@@ -577,14 +578,17 @@ export class WidgetUI {
     button.disabled = loading;
     button.setAttribute("aria-pressed", String(active));
     if (loading) {
-      button.title = "Loading your reported elements";
+      button.setAttribute("aria-label", "Loading reported elements");
     } else if (error) {
-      button.title = "Could not load reported elements";
+      button.setAttribute("aria-label", "Could not load reported elements");
     } else if (active) {
       const count = state.count ?? 0;
-      button.title = count === 1 ? "1 reported element highlighted" : `${count} reported elements highlighted`;
+      button.setAttribute(
+        "aria-label",
+        count === 1 ? "1 reported element highlighted" : `${count} reported elements highlighted`,
+      );
     } else {
-      button.title = "Highlight elements I reported on this page";
+      button.setAttribute("aria-label", "Highlight reported elements on this page");
     }
   }
 

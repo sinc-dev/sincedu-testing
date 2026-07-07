@@ -75,7 +75,7 @@ function normalizeIds(value: unknown): string[] {
     .slice(0, 200))];
 }
 
-type ActorSource = "dashboard" | "mcp";
+type ActorSource = "dashboard" | "mcp" | "widget";
 
 interface MutationActor {
   email: string;
@@ -88,6 +88,12 @@ function dashboardActor(email: string): MutationActor {
   const normalized = normalizeEmail(email);
   if (!normalized) throw new ReportError(403, "Updater email is required");
   return { email: normalized, source: "dashboard" };
+}
+
+function widgetActor(email: string): MutationActor {
+  const normalized = normalizeEmail(email);
+  if (!normalized) throw new ReportError(403, "Updater email is required");
+  return { email: normalized, source: "widget" };
 }
 
 function auditSnapshot(row: Record<string, unknown> | null): ReportAuditSnapshot | null {
@@ -412,6 +418,12 @@ async function canAccessReport(c: any, report: { reporter_email: string }): Prom
   return normalizeEmail(report.reporter_email) === normalizeEmail(user.email);
 }
 
+async function ensureTesterCanInspectReport(c: any, id: string): Promise<Record<string, unknown> | null> {
+  return await c.env.DB.prepare("SELECT * FROM reports WHERE id = ? AND deleted_at IS NULL LIMIT 1")
+    .bind(id)
+    .first() as Record<string, unknown> | null;
+}
+
 interface AnalyticsReportRow {
   id: string;
   project: string | null;
@@ -620,6 +632,7 @@ reports.get("/", requireAuth, requireTester, async (c) => {
   const user = c.get("user");
   const admin = isAdminEmail(user.email, c.env.ADMIN_EMAILS);
   const project = c.req.query("project");
+  const pageUrl = c.req.query("pageUrl")?.trim();
   const requestedLimit = Number(c.req.query("limit") ?? 200);
   const requestedOffset = Number(c.req.query("offset") ?? 0);
   const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200, 1), 500);
@@ -627,13 +640,18 @@ reports.get("/", requireAuth, requireTester, async (c) => {
 
   const filters: string[] = [];
   const binds: unknown[] = [];
-  if (!admin) {
+  if (!admin && !pageUrl) {
     filters.push("reporter_email = ?");
     binds.push(normalizeEmail(user.email));
   }
   if (project) {
     filters.push("project = ?");
     binds.push(project);
+  }
+  if (pageUrl) {
+    filters.push("page_url = ?");
+    binds.push(pageUrl.slice(0, 2000));
+    filters.push("element_selector IS NOT NULL");
   }
   filters.push("deleted_at IS NULL");
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -643,7 +661,7 @@ reports.get("/", requireAuth, requireTester, async (c) => {
 
   const { results } = await c.env.DB.prepare(
     `SELECT id, project, reporter_email, reporter_name, title, note, severity, status,
-            page_url, element_selector, console_count, network_count, screenshot_key,
+            page_url, element_selector, console_count, network_count, screenshot_key, screenshot_keys,
             updated_by_email, updated_by_source, fixed_at, fixed_by_email,
             fix_commit_sha, fix_commit_url, created_at, updated_at
      FROM reports ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
@@ -932,6 +950,82 @@ reports.get("/:id/audit", requireAuth, requireTester, async (c) => {
   return c.json({ events: results ?? [] });
 });
 
+// GET /:id/comments — comments visible to allowlisted testers.
+reports.get("/:id/comments", requireAuth, requireTester, async (c) => {
+  const id = c.req.param("id") ?? "";
+  const report = await ensureTesterCanInspectReport(c, id);
+  if (!report) return c.json({ error: "Not Found" }, 404);
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, report_id, author_email, body, created_at
+     FROM report_comments
+     WHERE report_id = ?
+     ORDER BY created_at ASC
+     LIMIT 100`,
+  )
+    .bind(id)
+    .all();
+  return c.json({ comments: results ?? [] });
+});
+
+// POST /:id/comments — add a comment from an allowlisted tester.
+reports.post("/:id/comments", requireAuth, requireTester, async (c) => {
+  const id = c.req.param("id") ?? "";
+  const report = await ensureTesterCanInspectReport(c, id);
+  if (!report) return c.json({ error: "Not Found" }, 404);
+
+  const user = c.get("user");
+  const body = await c.req.json<Record<string, unknown>>();
+  const text = sanitizePlainText(body.body, 2000);
+  if (!text) return c.json({ error: "Bad Request", message: "comment is required" }, 400);
+
+  const comment = {
+    id: uuid(),
+    report_id: id,
+    author_email: normalizeEmail(user.email),
+    body: text,
+    created_at: new Date().toISOString(),
+  };
+  await c.env.DB.prepare(
+    `INSERT INTO report_comments (id, report_id, author_email, body, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  )
+    .bind(comment.id, comment.report_id, comment.author_email, comment.body, comment.created_at)
+    .run();
+  return c.json({ comment });
+});
+
+// PATCH /:id/status — allowlisted testers can move a highlighted report's stage.
+reports.patch("/:id/status", requireAuth, requireTester, async (c) => {
+  const id = c.req.param("id") ?? "";
+  const before = await getReportForAudit(c.env, id);
+  if (!before || before.deleted_at) return c.json({ error: "Not Found" }, 404);
+
+  const body = await c.req.json<Record<string, unknown>>();
+  const status = normalizeStatus(body.status);
+  if (!status) return c.json({ error: "Bad Request", message: "status must be one of: open, investigating, in_progress, fixed, resolved, closed" }, 400);
+
+  const user = c.get("user");
+  const actor = widgetActor(user.email);
+  const result = await c.env.DB.prepare(
+    `UPDATE reports
+     SET status = ?,
+         fixed_at = CASE WHEN ? = 'fixed' AND fixed_at IS NULL THEN datetime('now') ELSE fixed_at END,
+         fixed_by_email = CASE WHEN ? = 'fixed' AND fixed_by_email IS NULL THEN ? ELSE fixed_by_email END,
+         updated_by_email = ?,
+         updated_by_source = ?,
+         updated_at = datetime('now')
+     WHERE id = ? AND deleted_at IS NULL`,
+  )
+    .bind(status, status, status, actor.email, actor.email, actor.source, id)
+    .run();
+  if (!result.meta || result.meta.changes === 0) return c.json({ error: "Not Found" }, 404);
+
+  const after = await getReportForAudit(c.env, id);
+  await insertReportAuditEvent(c.env, id, actor, "status_update", auditSnapshot(before), auditSnapshot(after));
+  return c.json({ id, status });
+});
+
 // GET /:id — full report (admin or owner)
 reports.get("/:id", requireAuth, requireTester, async (c) => {
   const id = c.req.param("id") ?? "";
@@ -968,7 +1062,6 @@ reports.get("/:id/screenshot", requireAuth, requireTester, async (c) => {
     .bind(id)
     .first();
   if (!report) return c.json({ error: "Not Found" }, 404);
-  if (!(await canAccessReport(c, report as { reporter_email: string }))) return c.json({ error: "Forbidden" }, 403);
   return serveR2(c, reportScreenshotKeys(report as { screenshot_key: string | null; screenshot_keys: string | null })[0] ?? null);
 });
 
@@ -980,7 +1073,6 @@ reports.get("/:id/screenshot/:index", requireAuth, requireTester, async (c) => {
     .bind(id)
     .first();
   if (!report) return c.json({ error: "Not Found" }, 404);
-  if (!(await canAccessReport(c, report as { reporter_email: string }))) return c.json({ error: "Forbidden" }, 403);
   const keys = reportScreenshotKeys(report as { screenshot_key: string | null; screenshot_keys: string | null });
   const key = Number.isInteger(index) && index >= 0 ? keys[index] ?? null : null;
   return serveR2(c, key);

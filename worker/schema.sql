@@ -46,6 +46,7 @@ CREATE INDEX IF NOT EXISTS reports_reporter_idx ON reports (reporter_email);
 CREATE INDEX IF NOT EXISTS reports_status_idx ON reports (status);
 CREATE INDEX IF NOT EXISTS reports_deleted_idx ON reports (deleted_at);
 CREATE INDEX IF NOT EXISTS reports_created_idx ON reports (created_at);
+CREATE INDEX IF NOT EXISTS reports_highlight_lookup_idx ON reports (project, page_url, deleted_at, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS report_audit_events (
   id TEXT PRIMARY KEY,
@@ -60,6 +61,17 @@ CREATE TABLE IF NOT EXISTS report_audit_events (
 );
 CREATE INDEX IF NOT EXISTS report_audit_events_report_idx ON report_audit_events (report_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS report_audit_events_actor_idx ON report_audit_events (actor_email);
+
+CREATE TABLE IF NOT EXISTS report_comments (
+  id TEXT PRIMARY KEY,
+  report_id TEXT NOT NULL,
+  author_email TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (report_id) REFERENCES reports(id)
+);
+CREATE INDEX IF NOT EXISTS report_comments_report_idx ON report_comments (report_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS report_comments_author_idx ON report_comments (author_email);
 
 CREATE TABLE IF NOT EXISTS mcp_tokens (
   id TEXT PRIMARY KEY,

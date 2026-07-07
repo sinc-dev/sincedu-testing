@@ -4,6 +4,7 @@
   "private": true,
   "description": "Embeddable tester-feedback tool: element picker + screenshot + logs, Supabase-gated, Cloudflare-native (D1 + R2).",
   "scripts": {
+    "dev": "pnpm --parallel --filter @sincedu-testing/worker --filter @sincedu-testing/widget --filter @sincedu-testing/app run dev",
     "dev:worker": "pnpm -C worker run dev",
     "dev:worker:remote": "pnpm -C worker run dev:remote",
     "dev:widget": "pnpm -C widget run dev",

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, FileText, Grid2X2, Menu, MousePointer2, Plug, UserPlus } from "lucide-react";
+import { ChevronDown, FileText, Grid2X2, Menu, MousePointer2, Plug, ShieldAlert, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "./useAuth";
 import { getAccess, type AccessInfo } from "./api";
@@ -300,12 +300,13 @@ export default function App() {
       <div className="mx-auto max-w-[1240px] p-3 min-[821px]:px-[18px] min-[821px]:py-[14px]">
         {!access && accessError ? (
           <Card>
-            <CardHeader>
+            <CardHeader className="items-center px-6 py-10 text-center">
+              <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+                <ShieldAlert className="h-5 w-5" aria-hidden="true" />
+              </div>
               <CardTitle>Could not confirm access</CardTitle>
               <CardDescription>{accessError}</CardDescription>
-              <div>
-                <Button variant="outline" onClick={() => void checkAccess()}>Retry</Button>
-              </div>
+              <Button className="mt-2" variant="outline" onClick={() => void checkAccess()}>Retry</Button>
             </CardHeader>
           </Card>
         ) : !access ? (

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import mcp from "./mcp.js";
 import reports from "./reports.js";
@@ -228,9 +229,9 @@ class FakeStatement {
   private runBulkReportUpdate() {
     const isStatusUpdate = this.sql.includes("SET status = ?");
     const status = isStatusUpdate ? String(this.values[0]) : null;
-    const actorEmail = String(this.values[isStatusUpdate ? 1 : 0]);
-    const actorSource = String(this.values[isStatusUpdate ? 2 : 1]);
-    const candidateIds = this.values.slice(isStatusUpdate ? 3 : 2).map(String);
+    const actorEmail = String(this.values[isStatusUpdate ? 4 : 0]);
+    const actorSource = String(this.values[isStatusUpdate ? 5 : 1]);
+    const candidateIds = this.values.slice(isStatusUpdate ? 6 : 2).map(String);
     let changes = 0;
 
     for (const id of candidateIds) {
@@ -588,14 +589,20 @@ describe("Dashboard report audit trail", () => {
 });
 
 describe("report audit schema", () => {
-  it("normalizes status attribution into audit events without fixed report columns", () => {
-    const schema = readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
-    const migration = readFileSync(new URL("../../migrations/0003_add_report_attribution_audit.sql", import.meta.url), "utf8");
+  it("keeps audit events and fixed report tracking columns in schema", () => {
+    const schema = readFileSync(fileURLToPath(new URL("../../schema.sql", import.meta.url).href), "utf8");
+    const migration = readFileSync(fileURLToPath(new URL("../../migrations/0003_add_report_attribution_audit.sql", import.meta.url).href), "utf8");
+    const fixCommitMigration = readFileSync(fileURLToPath(new URL("../../migrations/0004_add_fix_commit_tracking.sql", import.meta.url).href), "utf8");
 
     expect(schema).toContain("CREATE TABLE IF NOT EXISTS report_audit_events");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS report_audit_events");
-    expect(schema).not.toContain("fixed_by_email");
-    expect(schema).not.toContain("fixed_at");
+    expect(schema).toContain("fixed_by_email TEXT");
+    expect(schema).toContain("fixed_at TEXT");
+    expect(schema).toContain("fix_commit_sha TEXT");
+    expect(schema).toContain("fix_commit_url TEXT");
+    expect(fixCommitMigration).toContain("ADD COLUMN fixed_by_email TEXT");
+    expect(fixCommitMigration).toContain("ADD COLUMN fix_commit_sha TEXT");
+    expect(fixCommitMigration).toContain("ADD COLUMN fix_commit_url TEXT");
     expect(schema).not.toContain("reports_fixed_requires");
     expect(migration).not.toContain("fixed_by_email");
     expect(migration).not.toContain("reports_fixed_requires");
