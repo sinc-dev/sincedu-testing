@@ -77,6 +77,54 @@ function buildSelector(el: Element): string {
   return parts.join(" > ");
 }
 
+// A "pass-through scrim" is a full-screen overlay/backdrop that sits on top of
+// the content the tester is actually aiming at — e.g. a Radix/vaul/MUI dialog
+// overlay, or any hand-rolled modal backdrop. These capture pointer hit-testing
+// (pointer-events: auto) so a naive elementFromPoint returns the scrim instead
+// of the element beneath it. We detect them structurally (positioned, covering
+// ~the whole viewport, with no text content of their own) rather than by any
+// framework-specific class/attribute, so picking works with or without Radix,
+// vaul, MUI, or anything else.
+function isPassThroughScrim(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el === document.body || el === document.documentElement) return false;
+  const cs = getComputedStyle(el);
+  if (cs.position !== "fixed" && cs.position !== "absolute") return false;
+  if (cs.pointerEvents === "none" || cs.visibility === "hidden") return false;
+  const r = el.getBoundingClientRect();
+  const coversViewport =
+    (r.left <= 1 && r.top <= 1 && r.right >= innerWidth - 1 && r.bottom >= innerHeight - 1) ||
+    (r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9);
+  if (!coversViewport) return false;
+  // A real content surface (hero, full-screen panel) has its own text; a scrim
+  // is empty or only wraps a smaller panel. If the tester is over that smaller
+  // panel, elementsFromPoint returns it first anyway, so we never reach here.
+  const hasOwnText = Array.from(el.childNodes).some(
+    (n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim().length > 0,
+  );
+  return !hasOwnText;
+}
+
+// Resolve the real element under the cursor, transparently skipping the widget's
+// own UI and any full-screen overlay scrims. Uses elementsFromPoint (the full
+// front-to-back hit stack) so it lands on the drawer panel / button / field the
+// tester is pointing at, no matter what modal layer a framework painted on top.
+function resolveTargetAt(x: number, y: number): Element | null {
+  const stack: Element[] =
+    typeof document.elementsFromPoint === "function"
+      ? document.elementsFromPoint(x, y)
+      : ([document.elementFromPoint(x, y)].filter(Boolean) as Element[]);
+  for (const el of stack) {
+    if (!el || el === document.documentElement) continue;
+    // Never pick the widget's own launcher / picker chrome.
+    if (el.closest(`[${IGNORE_ATTR}]`)) continue;
+    // See through full-screen backdrops to the content beneath.
+    if (isPassThroughScrim(el)) continue;
+    return el;
+  }
+  return document.body;
+}
+
 // Outlines the given elements with the picker highlight color, captures the
 // CURRENT VIEWPORT (not the full off-screen page) so:
 //   - the image reflects what the tester actually sees,
@@ -247,10 +295,10 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
   let suppressClick = false;
 
   const showHover = (event: MouseEvent) => {
-    const el = document.elementFromPoint(event.clientX, event.clientY);
+    // resolveTargetAt already skips the widget's own UI and any full-screen
+    // overlay scrims, so the highlight tracks the real element underneath.
+    const el = resolveTargetAt(event.clientX, event.clientY);
     if (!el || el === highlight || el === hint) return;
-    // Ignore the widget's own UI.
-    if (el.closest(`[${IGNORE_ATTR}]`)) return;
     currentTarget = el;
     const rect = el.getBoundingClientRect();
     highlight.style.transition = "all 60ms ease";
@@ -361,7 +409,7 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
 
   // Select the element currently under the cursor (the no-drag / click path).
   const pickElement = (event: MouseEvent) => {
-    commitElement(currentTarget || document.elementFromPoint(event.clientX, event.clientY), {
+    commitElement(currentTarget || resolveTargetAt(event.clientX, event.clientY), {
       x: event.clientX,
       y: event.clientY,
     });
