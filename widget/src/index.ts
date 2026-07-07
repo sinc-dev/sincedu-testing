@@ -4,6 +4,7 @@ import {
   startElementPicker,
   captureViewport,
   captureScreenshotWithHighlights,
+  resolveUniqueTarget,
   type CapturedTarget,
   type PickerHandle,
 } from "./picker.js";
@@ -190,7 +191,7 @@ function boot() {
   const moveReportHighlightOverlays = () => {
     for (const overlay of reportHighlightOverlays) {
       const selector = overlay.dataset.selector;
-      const target = selector ? document.querySelector(selector) : null;
+      const target = selector ? resolveUniqueTarget(selector) : null;
       if (!(target instanceof Element)) {
         overlay.style.display = "none";
         continue;
@@ -738,13 +739,8 @@ function boot() {
     }
 
     for (const [selector, selectorReports] of reportsBySelector) {
-      let target: Element | null = null;
-      try {
-        target = document.querySelector(selector);
-      } catch {
-        continue;
-      }
-      if (!target || target.closest(`[${IGNORE_ATTR}]`)) continue;
+      const target = resolveUniqueTarget(selector);
+      if (!target) continue;
 
       const theme = reportHighlightTheme(selectorReports);
       const reporterStack = reportReporterStack(selectorReports);
@@ -1254,10 +1250,14 @@ function boot() {
       // Take a fresh overview (all picked elements outlined) when there are real
       // elements to show. A viewport/pasted-only report already carries its image.
       let sendTimeShot: File | null = null;
-      let screenshotError: string | undefined;
+      // Carry forward any capture-time failure (e.g. a drag-to-select area whose
+      // screenshot couldn't be taken) so the report records why an image is
+      // missing rather than dropping the reason.
+      let screenshotError = targets.map((t) => t.screenshotError).find(Boolean);
       if (realElements.length > 0 || manualShots.length === 0) {
         try {
           sendTimeShot = await captureScreenshotWithHighlights(realElements);
+          screenshotError = undefined;
         } catch (err) {
           screenshotError = err instanceof Error ? err.message : "Screenshot capture failed";
         }

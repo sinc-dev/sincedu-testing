@@ -51,30 +51,101 @@ function shouldIncludeInScreenshot(node: Node): boolean {
   return !node.closest(`[${IGNORE_ATTR}]`);
 }
 
-function buildSelector(el: Element): string {
-  if (el.id) return `#${CSS.escape(el.id)}`;
-  const testId = el.getAttribute("data-testid");
-  if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+// Author-provided test hooks. Values are intended to be stable identities, so we
+// trust them even when they embed a database id (e.g. data-testid="row-640c4d").
+const TEST_ATTRS = ["data-testid", "data-test", "data-qa", "data-cy"] as const;
 
-  const parts: string[] = [];
+// Ids/names that are safe to depend on across sessions. Rejects framework-
+// generated tokens that change on every render: Radix/React `useId` (":r3:",
+// ":R2h:") and long hashed runs (Emotion/CSS-modules/RSC ids, timestamps).
+function stableIdish(token: string | null): token is string {
+  if (!token) return false;
+  if (token.includes(":")) return false;
+  if (/\d{4,}/.test(token)) return false;
+  return true;
+}
+
+// A selector that targets `el` directly via a stable, human-meaningful hook —
+// or null if the element has none. Not guaranteed unique on its own; the caller
+// verifies uniqueness before trusting it.
+function directSelector(el: Element): string | null {
+  const tag = el.tagName.toLowerCase();
+  for (const attr of TEST_ATTRS) {
+    const value = el.getAttribute(attr);
+    if (value && !value.includes(":")) return `${tag}[${attr}="${CSS.escape(value)}"]`;
+  }
+  if (stableIdish(el.id)) return `#${CSS.escape(el.id)}`;
+  const name = el.getAttribute("name");
+  if (stableIdish(name)) return `${tag}[name="${CSS.escape(name)}"]`;
+  return null;
+}
+
+function matchesExactlyOne(selector: string): boolean {
+  try {
+    return document.querySelectorAll(selector).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+// Position of `node` among its same-tag siblings, as a `:nth-of-type()` clause —
+// omitted when it's the only element of its type (keeps selectors short/stable).
+function nthOfType(node: Element): string {
+  const parent = node.parentElement;
+  if (!parent) return "";
+  const sameTag = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+  if (sameTag.length <= 1) return "";
+  return `:nth-of-type(${sameTag.indexOf(node) + 1})`;
+}
+
+// Build a selector that resolves to EXACTLY the picked element. The old builder
+// stopped after 5 levels and never checked uniqueness, so it emitted unanchored,
+// ambiguous paths (`div:nth-of-type(2) > button`) that `querySelector` happily
+// matched against the *first* similar element elsewhere on the page — that's the
+// "highlights the wrong element" bug. Here we grow the path upward and stop the
+// moment it's provably unique, preferring stable id/test-attr anchors that also
+// survive sibling re-ordering. Falls back to a body-rooted structural path.
+function buildSelector(el: Element): string {
+  const direct = directSelector(el);
+  if (direct && matchesExactlyOne(direct)) return direct;
+
+  const segments: string[] = [];
   let node: Element | null = el;
-  let depth = 0;
-  while (node && node.nodeType === Node.ELEMENT_NODE && depth < 5) {
-    let part = node.tagName.toLowerCase();
-    if (node.id) {
-      parts.unshift(`#${CSS.escape(node.id)}`);
+  const MAX_DEPTH = 25;
+  for (let depth = 0; node && node !== document.documentElement && depth < MAX_DEPTH; depth += 1) {
+    // A stable, unique ancestor anchor bounds the search and shortens the path.
+    const anchor = directSelector(node);
+    if (anchor && matchesExactlyOne(anchor)) {
+      segments.unshift(anchor);
+      const anchored = segments.join(" > ");
+      if (matchesExactlyOne(anchored)) return anchored;
       break;
     }
-    const parent: Element | null = node.parentElement;
-    if (parent) {
-      const sameTag = Array.from(parent.children).filter((c) => c.tagName === node!.tagName);
-      if (sameTag.length > 1) part += `:nth-of-type(${sameTag.indexOf(node) + 1})`;
-    }
-    parts.unshift(part);
-    node = parent;
-    depth += 1;
+
+    segments.unshift(node.tagName.toLowerCase() + nthOfType(node));
+    const candidate = segments.join(" > ");
+    if (matchesExactlyOne(candidate)) return candidate;
+
+    node = node.parentElement;
   }
-  return parts.join(" > ");
+
+  // Never proved unique (very deep or genuinely duplicated subtree). Root the
+  // path at <body> so it can't match a loose chain elsewhere in the document.
+  return segments.length ? `body > ${segments.join(" > ")}` : el.tagName.toLowerCase();
+}
+
+// Resolve a stored selector to a single live element, or null when it no longer
+// matches exactly one node (DOM changed since capture). Returning null instead of
+// the first match keeps a stale selector from highlighting the wrong element.
+export function resolveUniqueTarget(selector: string): Element | null {
+  let matches: NodeListOf<Element>;
+  try {
+    matches = document.querySelectorAll(selector);
+  } catch {
+    return null;
+  }
+  const live = Array.from(matches).filter((el) => !el.closest(`[${IGNORE_ATTR}]`));
+  return live.length === 1 ? live[0] : null;
 }
 
 // A "pass-through scrim" is a full-screen overlay/backdrop that sits on top of
@@ -425,18 +496,25 @@ export function startElementPicker(options: PickerOptions): PickerHandle {
       return;
     }
     pause();
+    const base = {
+      selector: `(area ${Math.round(area.width)}×${Math.round(area.height)})`,
+      text: "",
+      rect: { x: Math.round(area.x), y: Math.round(area.y), width: Math.round(area.width), height: Math.round(area.height) },
+      pointer: { x: event.clientX, y: event.clientY },
+      element: document.body,
+    };
     try {
       const screenshot = await captureArea(area);
+      options.onPick({ ...base, screenshot });
+    } catch (err) {
+      // Capturing the region failed (tainted canvas from cross-origin
+      // images/fonts, CSP, a huge DOM, etc.). Still open the report card so the
+      // gesture isn't a silent no-op — the tester can file the note/logs and the
+      // failure is surfaced rather than swallowed.
       options.onPick({
-        selector: `(area ${Math.round(area.width)}×${Math.round(area.height)})`,
-        text: "",
-        rect: { x: Math.round(area.x), y: Math.round(area.y), width: Math.round(area.width), height: Math.round(area.height) },
-        pointer: { x: event.clientX, y: event.clientY },
-        element: document.body,
-        screenshot,
+        ...base,
+        screenshotError: err instanceof Error ? err.message : "Area capture failed",
       });
-    } catch {
-      resume();
     }
   };
 
