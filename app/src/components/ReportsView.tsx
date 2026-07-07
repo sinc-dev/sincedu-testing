@@ -39,6 +39,7 @@ const CX = {
   selectCell: "w-10 text-center",
   statusCell: "hidden w-[148px] min-[900px]:table-cell",
   reporterCell: "hidden w-[260px] max-w-[260px] truncate text-muted-foreground min-[900px]:table-cell",
+  fixedByCell: "hidden w-[220px] max-w-[220px] truncate text-muted-foreground min-[900px]:table-cell",
   reportLayout:
     "grid grid-cols-[76px_minmax(0,1fr)] items-center gap-3 min-[900px]:grid-cols-[88px_minmax(0,1fr)] min-[900px]:gap-3.5",
   thumb: "block h-[50px] w-[76px] rounded-md border bg-muted object-cover min-[900px]:h-14 min-[900px]:w-[88px]",
@@ -620,6 +621,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                 <TableHead>Report</TableHead>
                 <TableHead className={CX.statusCell}>Status</TableHead>
                 {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
+                {isAdmin ? <TableHead className={CX.fixedByCell}>Fixed by</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -634,6 +636,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                   </TableCell>
                   <TableCell className={CX.statusCell}><Skeleton className="h-7 w-24 rounded-full" /></TableCell>
                   {isAdmin ? <TableCell className={CX.reporterCell}><Skeleton className="h-4 w-40" /></TableCell> : null}
+                  {isAdmin ? <TableCell className={CX.fixedByCell}><Skeleton className="h-4 w-32" /></TableCell> : null}
                 </TableRow>
               ))}
             </TableBody>
@@ -664,6 +667,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                 <TableHead>Report</TableHead>
                 <TableHead className={CX.statusCell}>Status</TableHead>
                 {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
+                {isAdmin ? <TableHead className={CX.fixedByCell}>Fixed by</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -724,6 +728,7 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                     {renderStatusControl(r)}
                   </TableCell>
                   {isAdmin ? <TableCell className={CX.reporterCell}>{r.reporter_email}</TableCell> : null}
+                  {isAdmin ? <TableCell className={CX.fixedByCell}>{r.fixed_by_email ?? "—"}</TableCell> : null}
                 </TableRow>
               ))}
             </TableBody>
