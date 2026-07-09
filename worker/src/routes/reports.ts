@@ -319,7 +319,7 @@ async function persistReportCore(env: Env, params: {
     });
   }
 
-  await env.DB.prepare(
+  const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO reports (
       id, project, reporter_email, reporter_name, title, note, severity,
       page_url, user_agent, element_selector, element_text, element_rect, elements,
@@ -348,6 +348,23 @@ async function persistReportCore(env: Env, params: {
       networkLogs.length,
     )
     .run();
+
+  // `INSERT OR IGNORE` silently writes nothing on a constraint conflict. Never
+  // report success blindly — the widget shows "Report sent ✓" on any 2xx, so a
+  // dropped row here previously surfaced as a false confirmation. When no row
+  // was written, distinguish an idempotent replay (the id already exists →
+  // success) from a genuine drop (nothing persisted → surface an error so the
+  // client can retry instead of losing the report).
+  if (!result.meta || result.meta.changes === 0) {
+    const existing = await env.DB
+      .prepare("SELECT status FROM reports WHERE id = ? LIMIT 1")
+      .bind(id)
+      .first<{ status: string | null }>();
+    if (!existing) {
+      throw new Error(`Report ${id} was not persisted (insert ignored, no existing row)`);
+    }
+    return { id, status: existing.status ?? "open" };
+  }
 
   return { id, status: "open" };
 }
