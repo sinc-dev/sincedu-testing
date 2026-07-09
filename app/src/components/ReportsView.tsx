@@ -35,11 +35,12 @@ const STATUSES = ["open", "investigating", "in_progress", "fixed", "resolved", "
 // `min-[900px]` is the desktop breakpoint; below it the status/reporter
 // columns collapse into the stacked mobile fields inside the report cell.
 const CX = {
-  table: "min-w-0 table-fixed min-[900px]:min-w-[860px]",
+  table: "min-w-0 table-fixed min-[900px]:min-w-[1080px]",
   selectCell: "w-10 text-center",
   statusCell: "hidden w-[148px] min-[900px]:table-cell",
   reporterCell: "hidden w-[260px] max-w-[260px] truncate text-muted-foreground min-[900px]:table-cell",
   fixedByCell: "hidden w-[220px] max-w-[220px] truncate text-muted-foreground min-[900px]:table-cell",
+  dateCell: "hidden w-[110px] whitespace-nowrap text-muted-foreground min-[900px]:table-cell",
   reportLayout:
     "grid grid-cols-[76px_minmax(0,1fr)] items-center gap-3 min-[900px]:grid-cols-[88px_minmax(0,1fr)] min-[900px]:gap-3.5",
   thumb: "block h-[50px] w-[76px] rounded-md border bg-muted object-cover min-[900px]:h-14 min-[900px]:w-[88px]",
@@ -622,6 +623,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                 <TableHead className={CX.statusCell}>Status</TableHead>
                 {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
                 {isAdmin ? <TableHead className={CX.fixedByCell}>Fixed by</TableHead> : null}
+                <TableHead className={CX.dateCell}>Created</TableHead>
+                <TableHead className={CX.dateCell}>Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -637,6 +640,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                   <TableCell className={CX.statusCell}><Skeleton className="h-7 w-24 rounded-full" /></TableCell>
                   {isAdmin ? <TableCell className={CX.reporterCell}><Skeleton className="h-4 w-40" /></TableCell> : null}
                   {isAdmin ? <TableCell className={CX.fixedByCell}><Skeleton className="h-4 w-32" /></TableCell> : null}
+                  <TableCell className={CX.dateCell}><Skeleton className="h-4 w-16" /></TableCell>
+                  <TableCell className={CX.dateCell}><Skeleton className="h-4 w-16" /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -668,6 +673,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                 <TableHead className={CX.statusCell}>Status</TableHead>
                 {isAdmin ? <TableHead className={CX.reporterCell}>Reporter</TableHead> : null}
                 {isAdmin ? <TableHead className={CX.fixedByCell}>Fixed by</TableHead> : null}
+                <TableHead className={CX.dateCell}>Created</TableHead>
+                <TableHead className={CX.dateCell}>Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -729,6 +736,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
                   </TableCell>
                   {isAdmin ? <TableCell className={CX.reporterCell}>{r.reporter_email}</TableCell> : null}
                   {isAdmin ? <TableCell className={CX.fixedByCell}>{r.fixed_by_email ?? "—"}</TableCell> : null}
+                  <TableCell className={CX.dateCell}>{new Date(r.created_at).toLocaleDateString()}</TableCell>
+                  <TableCell className={CX.dateCell}>{new Date(r.updated_at).toLocaleDateString()}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
