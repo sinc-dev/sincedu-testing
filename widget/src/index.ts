@@ -1406,7 +1406,8 @@ function boot() {
   window.addEventListener("popstate", schedulePageNavigationCheck);
   window.addEventListener("hashchange", schedulePageNavigationCheck);
 
-  void enableReportHighlights();
+  // Report highlights (and the sign-in they require) start OFF. The tester turns
+  // them on with the highlight control; capture entry points authorize on demand.
 
   // ⌥K toggles the picker, unless the user is typing in a field.
   window.addEventListener("keydown", (event) => {
