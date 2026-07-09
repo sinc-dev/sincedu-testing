@@ -185,19 +185,6 @@ function installWidgetEventBoundary(el: HTMLElement): void {
     el.addEventListener(type, (event) => event.stopPropagation());
   }
 
-  // Keystrokes typed inside the widget (e.g. the report note textarea) must not
-  // reach the host app's global keyboard shortcuts. Because the widget lives in
-  // a shadow root, events that bubble to window are retargeted to this host
-  // element, so a host shortcut's "am I typing in a field?" guard sees the host
-  // <div> instead of our textarea and wrongly fires — e.g. the chat inbox binds
-  // "n" to compose, swallowing the letter. Stop key events at the boundary (in
-  // the bubble phase, after our own controls have handled them) so they never
-  // leak out. We intentionally do NOT stop in the capture phase, which would
-  // prevent the keystroke from ever reaching our inputs.
-  for (const type of ["keydown", "keyup", "keypress"]) {
-    el.addEventListener(type, (event) => event.stopPropagation());
-  }
-
   // Focus events from inside a shadow root are retargeted to the shadow host.
   // A document-level Radix FocusScope can see that retargeted focus before the
   // host's own listener runs and immediately pull focus back into its drawer.
