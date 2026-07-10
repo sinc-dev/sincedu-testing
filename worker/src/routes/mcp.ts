@@ -5,7 +5,7 @@ import { normalizeEmail, uuid } from "../db.js";
 import { requireAuth, requireTester } from "../middleware.js";
 
 const MAX_TOKEN_NAME_LENGTH = 80;
-const MAX_REPORT_LIMIT = 50;
+const MAX_REPORT_LIMIT = 200;
 const DEFAULT_REPORT_LIMIT = 20;
 const MCP_SERVER_VERSION = "0.2.0";
 const TOKEN_PREFIX = "sinc_mcp_";
@@ -102,6 +102,12 @@ function numericLimit(value: unknown): number {
   const raw = Number(value ?? DEFAULT_REPORT_LIMIT);
   if (!Number.isFinite(raw)) return DEFAULT_REPORT_LIMIT;
   return Math.min(Math.max(Math.trunc(raw), 1), MAX_REPORT_LIMIT);
+}
+
+function numericOffset(value: unknown): number {
+  const raw = Number(value ?? 0);
+  if (!Number.isFinite(raw)) return 0;
+  return Math.max(Math.trunc(raw), 0);
 }
 
 function normalizeStatus(value: unknown): string | null {
@@ -237,8 +243,19 @@ async function listReportsForActor(c: any, actor: { email: string; isAdmin: bool
     binds.push(args.status.trim().toLowerCase().slice(0, 40));
   }
   const limit = numericLimit(args.limit);
-  binds.push(limit);
+  const offset = numericOffset(args.offset);
 
+  // Total matching rows (before limit/offset) so callers can paginate through
+  // the full set instead of silently getting only the newest `limit` rows.
+  const whereClause = filters.join(" AND ");
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS total FROM reports WHERE ${whereClause}`,
+  )
+    .bind(...binds)
+    .first();
+  const total = Number((totalRow as { total?: number } | null)?.total ?? 0);
+
+  const pagedBinds = [...binds, limit, offset];
   const { results } = await c.env.DB.prepare(
     `SELECT id, project, reporter_email, reporter_name, title, note, severity, status,
             page_url, element_selector, console_count, network_count,
@@ -246,15 +263,19 @@ async function listReportsForActor(c: any, actor: { email: string; isAdmin: bool
             updated_by_email, updated_by_source, fixed_at, fixed_by_email,
             fix_commit_sha, fix_commit_url, created_at, updated_at
      FROM reports
-     WHERE ${filters.join(" AND ")}
+     WHERE ${whereClause}
      ORDER BY created_at DESC
-     LIMIT ?`,
+     LIMIT ? OFFSET ?`,
   )
-    .bind(...binds)
+    .bind(...pagedBinds)
     .all();
+  const reports = results ?? [];
   return {
-    reports: results ?? [],
+    reports,
     limit,
+    offset,
+    total,
+    hasMore: offset + reports.length < total,
   };
 }
 
@@ -425,7 +446,8 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "number", description: "Maximum reports to return, up to 50." },
+        limit: { type: "number", description: "Maximum reports to return, up to 200 (default 20)." },
+        offset: { type: "number", description: "Number of rows to skip for pagination (default 0). Response includes total + hasMore." },
         status: { type: "string", description: "Optional report status filter." },
         project: { type: "string", description: "Optional project filter." },
       },

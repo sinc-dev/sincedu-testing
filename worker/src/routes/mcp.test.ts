@@ -116,6 +116,24 @@ class FakeStatement {
       return { ...report };
     }
 
+    if (this.sql.includes("COUNT(*)") && this.sql.includes("FROM reports")) {
+      const binds = [...this.values];
+      let rows = [...this.db.reports.values()].filter((report) => !report.deleted_at);
+      if (this.sql.includes("reporter_email = ?")) {
+        const v = String(binds.shift());
+        rows = rows.filter((report) => report.reporter_email === v);
+      }
+      if (this.sql.includes("project = ?")) {
+        const v = String(binds.shift());
+        rows = rows.filter((report) => report.project === v);
+      }
+      if (this.sql.includes("status = ?")) {
+        const v = String(binds.shift());
+        rows = rows.filter((report) => report.status === v);
+      }
+      return { total: rows.length };
+    }
+
     return null;
   }
 
@@ -141,6 +159,7 @@ class FakeStatement {
 
     if (this.sql.includes("FROM reports") && this.sql.includes("ORDER BY created_at DESC")) {
       const binds = [...this.values];
+      const offset = Number(binds.pop() ?? 0);
       const limit = Number(binds.pop() ?? 20);
       let rows = [...this.db.reports.values()].filter((report) => !report.deleted_at);
 
@@ -160,7 +179,7 @@ class FakeStatement {
       return {
         results: rows
           .sort((a, b) => b.created_at.localeCompare(a.created_at))
-          .slice(0, limit)
+          .slice(offset, offset + limit)
           .map((report) => ({
             ...report,
             element_selector: null,
