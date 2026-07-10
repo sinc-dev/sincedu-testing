@@ -1,5 +1,17 @@
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") || "";
 
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+function realtimeUrl(token: string): string {
+  const base = new URL(API_BASE || window.location.origin, window.location.origin);
+  const url = new URL("/api/reports/realtime", base);
+  url.searchParams.set("token", token);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
 export interface AccessInfo {
   isTester: boolean;
   isAdmin: boolean;
@@ -183,7 +195,7 @@ export interface ReportAnalytics {
 async function authFetch(path: string, token: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
-  return fetch(`${API_BASE}${path}`, { ...init, headers });
+  return fetch(apiUrl(path), { ...init, headers });
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -235,6 +247,75 @@ export async function listReports(token: string): Promise<ReportRow[]> {
 export async function getReportAnalytics(token: string, days = 14): Promise<ReportAnalytics> {
   const params = new URLSearchParams({ days: String(days) });
   return json(await authFetch(`/api/reports/analytics?${params.toString()}`, token));
+}
+
+export interface ReportRealtimeEvent {
+  type: "report_changed";
+  action: "created" | "updated" | "deleted";
+  id?: string;
+  ids?: string[];
+  project?: string | null;
+  at: string;
+}
+
+export function subscribeReportChanges(
+  token: string,
+  handlers: {
+    onChange: (event: ReportRealtimeEvent) => void;
+    onOpen?: () => void;
+    onClose?: () => void;
+  },
+): () => void {
+  let closed = false;
+  let socket: WebSocket | null = null;
+  let retryTimer: ReturnType<typeof window.setTimeout> | null = null;
+  let retryDelay = 1000;
+
+  const clearRetry = () => {
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+
+  const connect = () => {
+    clearRetry();
+    socket = new WebSocket(realtimeUrl(token));
+
+    socket.addEventListener("open", () => {
+      retryDelay = 1000;
+      handlers.onOpen?.();
+    });
+
+    socket.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") return;
+      try {
+        const parsed = JSON.parse(event.data) as { type?: string };
+        if (parsed.type === "report_changed") handlers.onChange(parsed as ReportRealtimeEvent);
+      } catch {
+        // Ignore non-JSON control frames.
+      }
+    });
+
+    socket.addEventListener("close", () => {
+      socket = null;
+      handlers.onClose?.();
+      if (closed) return;
+      retryTimer = window.setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 15000);
+    });
+
+    socket.addEventListener("error", () => {
+      socket?.close();
+    });
+  };
+
+  connect();
+
+  return () => {
+    closed = true;
+    clearRetry();
+    socket?.close();
+    socket = null;
+  };
 }
 
 export async function getReport(token: string, id: string): Promise<ReportDetail> {

@@ -5,6 +5,7 @@ import type { Env, Variables } from "./types.js";
 import reports, { ingestEducationPortalsReport } from "./routes/reports.js";
 import allowlist from "./routes/allowlist.js";
 import mcp from "./routes/mcp.js";
+import { ReportRealtime } from "./realtime.js";
 import { WIDGET_JS } from "./generated/widgetBundle.js";
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -95,3 +96,5 @@ export default class SincEduTestingWorker extends WorkerEntrypoint<Env> {
     return ingestEducationPortalsReport(this.env, payload);
   }
 }
+
+export { ReportRealtime };

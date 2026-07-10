@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Camera, CheckCircle2, FileText, Monitor, RefreshCw, ShieldAlert } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
   getReportAnalytics,
+  subscribeReportChanges,
   type AnalyticsBreakdownItem,
   type AnalyticsTotals,
   type ProjectAnalytics,
@@ -56,6 +57,79 @@ function compactDate(value: string): string {
 function percent(value: number, total: number): string {
   if (total <= 0) return "0%";
   return `${Math.round((value / total) * 100)}%`;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setPrefersReducedMotion(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
+function useAnimatedNumber(value: number, duration = 520): number {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [displayValue, setDisplayValue] = useState(value);
+  const previousValue = useRef(value);
+
+  useEffect(() => {
+    if (prefersReducedMotion || previousValue.current === value) {
+      previousValue.current = value;
+      setDisplayValue(value);
+      return;
+    }
+
+    const from = previousValue.current;
+    const to = value;
+    const startedAt = performance.now();
+    let frame = 0;
+
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayValue(from + (to - from) * eased);
+      if (progress < 1) {
+        frame = window.requestAnimationFrame(tick);
+      } else {
+        previousValue.current = to;
+        setDisplayValue(to);
+      }
+    };
+
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [duration, prefersReducedMotion, value]);
+
+  return displayValue;
+}
+
+function AnimatedCount({ value }: { value: number }) {
+  const displayValue = useAnimatedNumber(value);
+  return <>{Math.round(displayValue).toLocaleString()}</>;
+}
+
+function AnimatedMetricValue({ value }: { value: number | string }) {
+  if (typeof value === "number") return <AnimatedCount value={value} />;
+
+  const pair = value.match(/^(\d+)\/(\d+)$/);
+  if (pair) {
+    return (
+      <>
+        <AnimatedCount value={Number(pair[1])} />
+        /
+        <AnimatedCount value={Number(pair[2])} />
+      </>
+    );
+  }
+
+  return <>{value}</>;
 }
 
 function delta(current: number, previous: number): string {
@@ -160,7 +234,9 @@ function StatCard({
           </span>
         </div>
         <div className="min-w-0">
-          <strong className="block min-w-0 overflow-wrap-anywhere text-3xl leading-none tracking-tight text-foreground">{value}</strong>
+          <strong className="block min-w-0 overflow-wrap-anywhere text-3xl leading-none tracking-tight text-foreground tabular-nums">
+            <AnimatedMetricValue value={value} />
+          </strong>
           {subtext ? <small className="mt-1 block text-xs text-muted-foreground">{subtext}</small> : null}
         </div>
         {deltaText ? (
@@ -214,7 +290,7 @@ function BreakdownList({
                     ) : null}
                     <span className="truncate text-xs text-muted-foreground">{item.name.replace("_", " ")}</span>
                   </div>
-                  <strong className="text-xs tabular-nums">{item.count}</strong>
+                  <strong className="text-xs tabular-nums"><AnimatedCount value={item.count} /></strong>
                 </div>
                 <Progress value={total <= 0 ? 0 : (item.count / total) * 100} aria-hidden="true" />
               </div>
@@ -255,7 +331,7 @@ function ProjectRow({
           <strong className="block truncate text-sm leading-tight">{project.project}</strong>
           <span className="block truncate text-xs text-muted-foreground">{project.primaryDomain ?? "No domain captured"}</span>
         </div>
-        <Badge variant="secondary" className="rounded-md tabular-nums">{project.total}</Badge>
+        <Badge variant="secondary" className="rounded-md tabular-nums"><AnimatedCount value={project.total} /></Badge>
       </div>
       <div
         className="flex h-2.5 min-w-0 gap-1 overflow-hidden rounded-full bg-[color-mix(in_oklch,var(--muted)_58%,var(--card))]"
@@ -275,9 +351,9 @@ function ProjectRow({
         />
       </div>
       <div className="grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
-        <span>{project.open} open</span>
-        <span className="text-center">{project.active} active</span>
-        <span className="text-right">{project.done} done</span>
+        <span><AnimatedCount value={project.open} /> open</span>
+        <span className="text-center"><AnimatedCount value={project.active} /> active</span>
+        <span className="text-right"><AnimatedCount value={project.done} /> done</span>
       </div>
     </button>
   );
@@ -308,9 +384,9 @@ function AllProjectsRow({
         </span>
         <div className="min-w-0 flex-1">
           <strong className="block truncate text-sm leading-tight">All projects</strong>
-          <span className="block truncate text-xs text-muted-foreground">{totals.projects} tracked projects</span>
+          <span className="block truncate text-xs text-muted-foreground"><AnimatedCount value={totals.projects} /> tracked projects</span>
         </div>
-        <Badge variant="secondary" className="rounded-md tabular-nums">{totals.reports}</Badge>
+        <Badge variant="secondary" className="rounded-md tabular-nums"><AnimatedCount value={totals.reports} /></Badge>
       </div>
       <div
         className="flex h-2.5 min-w-0 gap-1 overflow-hidden rounded-full bg-[color-mix(in_oklch,var(--muted)_58%,var(--card))]"
@@ -330,9 +406,9 @@ function AllProjectsRow({
         />
       </div>
       <div className="grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
-        <span>{totals.open} open</span>
-        <span className="text-center">{totals.active} active</span>
-        <span className="text-right">{totals.done} done</span>
+        <span><AnimatedCount value={totals.open} /> open</span>
+        <span className="text-center"><AnimatedCount value={totals.active} /> active</span>
+        <span className="text-right"><AnimatedCount value={totals.done} /> done</span>
       </div>
     </button>
   );
@@ -344,6 +420,8 @@ export function AnalyticsView({ isAdmin, getToken }: Props) {
   const [periodDays, setPeriodDays] = useState<PeriodDays>(14);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const realtimeRefreshTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -369,6 +447,36 @@ export function AnalyticsView({ isAdmin, getToken }: Props) {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    let cancelled = false;
+
+    const scheduleLoad = () => {
+      if (realtimeRefreshTimer.current) window.clearTimeout(realtimeRefreshTimer.current);
+      realtimeRefreshTimer.current = window.setTimeout(() => {
+        realtimeRefreshTimer.current = null;
+        void load();
+      }, 250);
+    };
+
+    void getToken().then((token) => {
+      if (cancelled || !token) return;
+      unsubscribe = subscribeReportChanges(token, {
+        onChange: scheduleLoad,
+        onOpen: () => setRealtimeConnected(true),
+        onClose: () => setRealtimeConnected(false),
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+      if (realtimeRefreshTimer.current) window.clearTimeout(realtimeRefreshTimer.current);
+      realtimeRefreshTimer.current = null;
+      setRealtimeConnected(false);
+    };
+  }, [getToken, load]);
+
   const selected = useMemo(() => {
     if (!analytics || selectedProject === "all") return null;
     return analytics.projects.find((project) => project.project === selectedProject) ?? null;
@@ -390,9 +498,15 @@ export function AnalyticsView({ isAdmin, getToken }: Props) {
           <h1 className="m-0 text-2xl font-semibold tracking-tight">{isAdmin ? "Analytics" : "My analytics"}</h1>
           <p className="mt-1 max-w-[58ch] text-[13px] text-muted-foreground">Report volume, triage state, and evidence coverage by project.</p>
         </div>
-        <Button size="icon" variant="outline" type="button" onClick={load} disabled={loading} aria-label="Refresh analytics">
-          <RefreshCw className={cn("size-4", loading && "animate-spin")} />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant={realtimeConnected ? "default" : "secondary"} className="rounded-md">
+            <Activity className="mr-1 size-3" />
+            {realtimeConnected ? "Live" : "Connecting"}
+          </Badge>
+          <Button size="icon" variant="outline" type="button" onClick={load} disabled={loading} aria-label="Refresh analytics">
+            <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+          </Button>
+        </div>
       </div>
 
       <Tabs

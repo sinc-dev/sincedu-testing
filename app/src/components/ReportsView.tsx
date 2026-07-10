@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, RefreshCw } from "lucide-react";
 import { cn } from "src/lib/utils";
 import { STATUS_PILL_STYLES } from "src/lib/status";
-import { bulkPatchReports, getScreenshotPreview, listReports, patchReport, type ReportRow, type ScreenshotPreview } from "../api";
+import { bulkPatchReports, getScreenshotPreview, listReports, patchReport, subscribeReportChanges, type ReportRow, type ScreenshotPreview } from "../api";
 import { ReportDetail } from "./ReportDetail";
 import { EmptyReports } from "./Illustrations";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
@@ -139,6 +139,8 @@ export function ReportsView({ isAdmin, getToken }: Props) {
   const [filters, setFilters] = useState<ReportFilters>(DEFAULT_FILTERS);
   const [page, setPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const realtimeRefreshTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const openReport = (id: string) => setSelected(id);
   const reporterOptions = [...new Set(reports.map((report) => report.reporter_email).filter(Boolean))].sort();
   const projectOptions = [...new Set(reports.map((report) => report.project).filter(Boolean))].sort();
@@ -214,6 +216,49 @@ export function ReportsView({ isAdmin, getToken }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Silent refetch used by the realtime feed — refreshes the list without
+  // flashing the loading skeleton or clobbering the current error state.
+  const refresh = useCallback(async () => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      setReports(await listReports(token));
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load");
+    }
+  }, [getToken]);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    let cancelled = false;
+
+    const scheduleRefresh = () => {
+      if (realtimeRefreshTimer.current) window.clearTimeout(realtimeRefreshTimer.current);
+      realtimeRefreshTimer.current = window.setTimeout(() => {
+        realtimeRefreshTimer.current = null;
+        void refresh();
+      }, 250);
+    };
+
+    void getToken().then((token) => {
+      if (cancelled || !token) return;
+      unsubscribe = subscribeReportChanges(token, {
+        onChange: scheduleRefresh,
+        onOpen: () => setRealtimeConnected(true),
+        onClose: () => setRealtimeConnected(false),
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+      if (realtimeRefreshTimer.current) window.clearTimeout(realtimeRefreshTimer.current);
+      realtimeRefreshTimer.current = null;
+      setRealtimeConnected(false);
+    };
+  }, [getToken, refresh]);
 
   useEffect(() => {
     setPage(1);
@@ -468,9 +513,15 @@ export function ReportsView({ isAdmin, getToken }: Props) {
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle>{isAdmin ? "All reports" : "My reports"}</CardTitle>
-        <Button variant="outline" size="icon" onClick={load} disabled={loading} aria-label="Refresh reports">
-          <RefreshCw aria-hidden="true" />
-        </Button>
+        <div className="flex items-center gap-2">
+          <Badge variant={realtimeConnected ? "default" : "secondary"} className="rounded-md">
+            <Activity className="mr-1 size-3" />
+            {realtimeConnected ? "Live" : "Connecting"}
+          </Badge>
+          <Button variant="outline" size="icon" onClick={load} disabled={loading} aria-label="Refresh reports">
+            <RefreshCw aria-hidden="true" />
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
       {selectedCount > 0 ? (

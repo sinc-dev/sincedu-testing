@@ -1,6 +1,7 @@
 export interface Env {
   DB: D1Database;
   STORAGE: R2Bucket;
+  REPORT_REALTIME?: DurableObjectNamespace;
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
   ALLOWED_ORIGINS: string;

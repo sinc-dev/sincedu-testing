@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { Env, Variables } from "../types.js";
-import { isAdminEmail } from "../auth.js";
+import { isAdminEmail, verifySupabaseToken } from "../auth.js";
 import { isAllowlisted, normalizeEmail, uuid } from "../db.js";
 import { requireAdmin, requireAuth, requireTester } from "../middleware.js";
+import { notifyReportsChanged, type ReportRealtimeEvent } from "../realtime.js";
 
 const MAX_SCREENSHOT_BYTES = 6 * 1024 * 1024;
 const MAX_LOG_ENTRIES = 200;
@@ -12,6 +13,18 @@ const JWT_PATTERN = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const reports = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+function queueReportChange(c: any, event: Omit<ReportRealtimeEvent, "type" | "at">): void {
+  if (!c.env.REPORT_REALTIME) return;
+  const task = notifyReportsChanged(c.env as Env, event).catch((err) => {
+    console.warn("[realtime] report change broadcast failed", err);
+  });
+  try {
+    c.executionCtx?.waitUntil?.(task);
+  } catch {
+    void task;
+  }
+}
 
 function redact(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -382,6 +395,7 @@ async function persistReport(c: any, params: {
       ...params,
       screenshots: params.screenshots as ScreenshotInput[],
     });
+    queueReportChange(c, { action: "created", id: result.id, project: params.project });
     return c.json(result, 201);
   } catch (err) {
     if (err instanceof ReportError) {
@@ -417,7 +431,7 @@ export async function ingestEducationPortalsReport(env: Env, payload: {
     payload.meta && typeof payload.meta === "object" ? payload.meta as Record<string, unknown> : {}
   );
 
-  return persistReportCore(env, {
+  const result = await persistReportCore(env, {
     project: typeof payload.project === "string" && payload.project.trim()
       ? payload.project
       : "educational-portals",
@@ -427,6 +441,10 @@ export async function ingestEducationPortalsReport(env: Env, payload: {
     screenshot: payload.screenshot,
     screenshots: payload.screenshots,
   });
+  await notifyReportsChanged(env, { action: "created", id: result.id }).catch((err) => {
+    console.warn("[realtime] report change broadcast failed", err);
+  });
+  return result;
 }
 
 async function canAccessReport(c: any, report: { reporter_email: string }): Promise<boolean> {
@@ -858,6 +876,35 @@ reports.get("/analytics", requireAuth, requireTester, async (c) => {
   });
 });
 
+// GET /realtime — authenticated WebSocket feed for report invalidation events.
+reports.get("/realtime", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.json({ error: "Expected WebSocket" }, 426);
+  }
+
+  const token = c.req.query("token");
+  if (!token) return c.json({ error: "Unauthorized", message: "Missing token" }, 401);
+
+  try {
+    const user = await verifySupabaseToken(token, c.env.SUPABASE_URL, c.env.SUPABASE_ANON_KEY);
+    const admin = isAdminEmail(user.email, c.env.ADMIN_EMAILS);
+    if (!admin && !(await isAllowlisted(c.env.DB, user.email))) {
+      return c.json({ error: "Forbidden", message: "Not an allowlisted tester" }, 403);
+    }
+  } catch (err) {
+    return c.json(
+      { error: "Unauthorized", message: err instanceof Error ? err.message : "Invalid token" },
+      401,
+    );
+  }
+
+  if (!c.env.REPORT_REALTIME) return c.json({ error: "Realtime unavailable" }, 503);
+
+  const id = c.env.REPORT_REALTIME.idFromName("reports");
+  const stub = c.env.REPORT_REALTIME.get(id);
+  return stub.fetch(new Request("https://reports-realtime/connect", c.req.raw));
+});
+
 async function serveR2(c: any, key: string | null) {
   if (!key) return c.json({ error: "Not Found" }, 404);
   const object = await c.env.STORAGE.get(key);
@@ -907,6 +954,7 @@ reports.post("/bulk", requireAuth, requireTester, async (c) => {
       const after = await getReportForAudit(c.env, reportId);
       await insertReportAuditEvent(c.env, reportId, actor, "delete", auditSnapshot(before), auditSnapshot(after));
     }
+    if ((result.meta?.changes ?? 0) > 0) queueReportChange(c, { action: "deleted", ids });
     return c.json({ updated: result.meta?.changes ?? 0 });
   }
 
@@ -943,6 +991,7 @@ reports.post("/bulk", requireAuth, requireTester, async (c) => {
     await insertReportAuditEvent(c.env, reportId, actor, "status_update", auditSnapshot(before), auditSnapshot(after));
   }
 
+  if ((result.meta?.changes ?? 0) > 0) queueReportChange(c, { action: "updated", ids });
   return c.json({ updated: result.meta?.changes ?? 0 });
 });
 
@@ -1040,6 +1089,7 @@ reports.patch("/:id/status", requireAuth, requireTester, async (c) => {
 
   const after = await getReportForAudit(c.env, id);
   await insertReportAuditEvent(c.env, id, actor, "status_update", auditSnapshot(before), auditSnapshot(after));
+  queueReportChange(c, { action: "updated", id });
   return c.json({ id, status });
 });
 
@@ -1173,6 +1223,7 @@ reports.patch("/:id", requireAuth, requireAdmin, async (c) => {
   if (!result.meta || result.meta.changes === 0) return c.json({ error: "Not Found" }, 404);
   const after = await getReportForAudit(c.env, id);
   await insertReportAuditEvent(c.env, id, actor, nextStatus ? "status_update" : "report_update", auditSnapshot(before), auditSnapshot(after));
+  queueReportChange(c, { action: "updated", id });
   return c.json({ id });
 });
 
@@ -1201,6 +1252,7 @@ reports.delete("/:id", requireAuth, requireTester, async (c) => {
   if (!result.meta || result.meta.changes === 0) return c.json({ error: "Not Found" }, 404);
   const after = await getReportForAudit(c.env, id);
   await insertReportAuditEvent(c.env, id, actor, "delete", auditSnapshot(before), auditSnapshot(after));
+  queueReportChange(c, { action: "deleted", id });
   return c.json({ id });
 });
 

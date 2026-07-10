@@ -23,6 +23,20 @@
   "dev": {
     "port": 8788
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPORT_REALTIME",
+        "class_name": "ReportRealtime"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1_report_realtime",
+      "new_sqlite_classes": ["ReportRealtime"]
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
